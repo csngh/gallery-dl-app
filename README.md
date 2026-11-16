@@ -7,6 +7,10 @@
 gallery-dl runs *inside the app* (embedded Python), so there is no server, no backend and no account.<br>
 Paste a link, press **Start**, and it becomes a folder you can browse and play, with live video previews.
 
+<a href="docs/demo.mp4"><img src="docs/demo.jpg" alt="Watch the 24-second demo video" width="760"></a>
+
+▶ [Watch the 24-second demo](docs/demo.mp4)
+
 ![Android 10+](https://img.shields.io/badge/Android-10%2B-3DDC84?logo=android&logoColor=white)
 ![Android TV](https://img.shields.io/badge/Android%20TV-supported-4285F4?logo=googletv&logoColor=white)
 ![iOS 15+](https://img.shields.io/badge/iOS-15%2B-000000?logo=apple&logoColor=white)

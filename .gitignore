@@ -41,3 +41,6 @@ ios/dist/
 .impeccable/
 CLAUDE.md
 PRODUCT.md
+
+# Generated launch-video working files (the finished video is docs/demo.mp4)
+brag-output*/
