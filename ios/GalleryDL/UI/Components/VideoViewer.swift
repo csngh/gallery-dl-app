@@ -1,0 +1,681 @@
+import AVFoundation
+import SwiftUI
+
+/// Every change of the audio session goes through one queue, in order. Switching can take seconds while the sound route
+/// changes, so it never happens on the main thread, and a late "back to quiet" can never land after the next video's
+/// "playback".
+private enum AudioSessionQueue {
+    private static let queue = DispatchQueue(label: "app.gallerydl.audio-session", qos: .userInitiated)
+
+    /// Sound on, mixing off: this is the one place the app plays audio on purpose.
+    static func playback() async {
+        await withCheckedContinuation { continuation in
+            queue.async {
+                let session = AVAudioSession.sharedInstance()
+                try? session.setCategory(.playback)
+                // The WebM player draws its own sound, so the session has to be switched on here; nothing else does it.
+                try? session.setActive(true)
+                continuation.resume()
+            }
+        }
+    }
+
+    /// The quiet category the live previews use, so they never interrupt the user's music.
+    static func quiet() {
+        queue.async { try? AVAudioSession.sharedInstance().setCategory(.ambient, mode: .default, options: [.mixWithOthers]) }
+    }
+}
+
+/// A layer-backed view that shows a player's video, letterboxed to fit.
+private final class VideoLayerView: UIView {
+    override class var layerClass: AnyClass { AVPlayerLayer.self }
+    var playerLayer: AVPlayerLayer { layer as! AVPlayerLayer }
+}
+
+private struct VideoSurface: UIViewRepresentable {
+    let player: AVPlayer
+
+    func makeUIView(context: Context) -> VideoLayerView {
+        let view = VideoLayerView()
+        view.playerLayer.player = player
+        view.playerLayer.videoGravity = .resizeAspect
+        return view
+    }
+
+    func updateUIView(_ view: VideoLayerView, context: Context) {}
+
+    static func dismantleUIView(_ view: VideoLayerView, coordinator: ()) { view.playerLayer.player = nil }
+}
+
+private struct WebMSurface: UIViewRepresentable {
+    let player: WebMPlayer
+
+    final class Coordinator {
+        let player: WebMPlayer
+        init(_ player: WebMPlayer) { self.player = player }
+    }
+
+    func makeCoordinator() -> Coordinator { Coordinator(player) }
+
+    func makeUIView(context: Context) -> WebMSurfaceView {
+        let view = WebMSurfaceView()
+        player.attach(view.displayLayer)
+        return view
+    }
+
+    func updateUIView(_ view: WebMSurfaceView, context: Context) {}
+
+    static func dismantleUIView(_ view: WebMSurfaceView, coordinator: Coordinator) { coordinator.player.detach(view.displayLayer) }
+}
+
+/// Owns the player of the full-screen viewer: play and pause, seeking, and the playback speed.
+@MainActor
+final class VideoController: ObservableObject {
+    /// A queue player, so that looping can use `AVPlayerLooper`, which has the next pass ready before the last one ends.
+    let player = AVQueuePlayer()
+    private var asset: AVURLAsset?
+    private var looper: AVPlayerLooper?
+    @Published private(set) var isPlaying = false
+    @Published var current = 0.0
+    @Published private(set) var duration = 0.0
+    @Published private(set) var speed = {
+        let saved = UserDefaults.standard.double(forKey: "videoSpeed")
+        return VideoController.speeds.contains(saved) ? saved : 1.0
+    }()
+    @Published private(set) var unplayable = false
+    /// Set instead of `player` for WebM files, which the system player cannot open (see Core/WebM).
+    @Published private(set) var webm: WebMPlayer?
+    /// Set while a WebM video has sound that cannot be played, so the screen says so instead of staying silent.
+    @Published private(set) var silentReason: String?
+    /// Plays the same video again when it ends. Remembered between videos and app launches.
+    @Published private(set) var looping = UserDefaults.standard.bool(forKey: "videoLoop")
+    var scrubbing = false
+    private var lastScrub = 0.0
+
+    private var timeObserver: Any?
+    private var endObserver: NSObjectProtocol?
+    private var statusObservation: NSKeyValueObservation?
+
+    static let speeds: [Double] = [0.25, 0.5, 0.75, 1, 1.25, 1.5, 2]
+
+    func load(_ item: LibraryItem) async {
+        if item.isWebM { await loadWebM(item); return }
+        guard player.currentItem == nil else { return }
+        let asset = AVURLAsset(url: item.fileURL)
+        guard (try? await asset.load(.isPlayable)) == true else { unplayable = true; return }
+        duration = ((try? await asset.load(.duration))?.seconds).flatMap { $0.isFinite ? $0 : nil } ?? 0
+        await AudioSessionQueue.playback()
+        self.asset = asset
+        let playerItem = AVPlayerItem(asset: asset)
+        if looping {
+            looper = AVPlayerLooper(player: player, templateItem: playerItem)
+        } else {
+            player.replaceCurrentItem(with: playerItem)
+            player.actionAtItemEnd = .pause
+        }
+
+        timeObserver = player.addPeriodicTimeObserver(forInterval: CMTime(seconds: 0.2, preferredTimescale: 600), queue: .main) { [weak self] time in
+            Task { @MainActor in
+                guard let self, !self.scrubbing, time.seconds.isFinite else { return }
+                self.current = time.seconds
+            }
+        }
+        endObserver = NotificationCenter.default.addObserver(forName: .AVPlayerItemDidPlayToEndTime, object: playerItem, queue: .main) { [weak self] _ in
+            Task { @MainActor in
+                guard let self else { return }
+                // A loop never reaches here: the looper keeps playing into the next pass.
+                if !self.looping { self.isPlaying = false }
+            }
+        }
+        statusObservation = player.observe(\.timeControlStatus, options: [.new]) { [weak self] player, _ in
+            Task { @MainActor in self?.isPlaying = player.timeControlStatus != .paused }
+        }
+    }
+
+    private func loadWebM(_ item: LibraryItem) async {
+        guard webm == nil else { return }
+        let url = item.fileURL
+        // Reading the file's structure is quick but not instant for a long video, so it stays off the main thread.
+        await AudioSessionQueue.playback()
+        guard let made = await Task.detached(priority: .userInitiated, operation: { WebMPlayer(url: url) }).value else { unplayable = true; return }
+        webm = made
+        made.setLooping(looping)
+        // The length can still change once the rest of a big file has been read in the background.
+        made.onIndexComplete = { [weak self] in Task { @MainActor in self?.duration = made.duration } }
+        duration = made.duration
+        made.observeTime(every: 0.2) { [weak self] time in
+            Task { @MainActor in
+                guard let self, self.webm === made, !self.scrubbing else { return }
+                if self.silentReason != made.silentReason { self.silentReason = made.silentReason }
+                self.current = min(time, made.endTime)
+                // While looping the player carries on into the next pass by itself, so there is no end to react to.
+                if self.isPlaying, !self.looping, time >= made.endTime { self.webmEnded() }
+            }
+        }
+    }
+
+    private func webmEnded() {
+        guard let webm else { return }
+        webm.pause()
+        isPlaying = false
+        current = webm.endTime
+    }
+
+    func play() {
+        if let webm {
+            if current >= webm.endTime - 0.25 {
+                current = 0
+                webm.seek(to: 0, rate: Float(speed))
+            } else {
+                webm.play(rate: Float(speed))
+            }
+            isPlaying = true
+            return
+        }
+        if player.currentItem == nil, let asset {
+            // A loop that was switched off ran out and left the queue empty: start the video again.
+            player.insert(AVPlayerItem(asset: asset), after: nil)
+            player.actionAtItemEnd = .pause
+            current = 0
+        } else if duration > 0, current >= duration - 0.25 { seek(to: 0) }
+        // Setting the rate starts playback at that speed; the speed survives pausing because it is kept here.
+        player.rate = Float(speed)
+    }
+
+    func pause() {
+        if let webm { webm.pause(); isPlaying = false; return }
+        player.pause()
+    }
+
+    /// Jumps forward or back by `delta` seconds and keeps playing or staying paused as it was.
+    func skip(by delta: Double) {
+        seek(to: min(max(current + delta, 0), duration > 0 ? duration : .greatestFiniteMagnitude))
+    }
+
+    func toggle() { isPlaying ? pause() : play() }
+
+    func seek(to seconds: Double) {
+        current = seconds
+        if let webm { webm.seek(to: seconds, rate: isPlaying ? Float(speed) : 0); return }
+        player.seek(to: CMTime(seconds: seconds, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero)
+    }
+
+    /// Moves the picture while a finger drags across the screen. The tolerance keeps it quick; the final seek is exact.
+    func scrub(to seconds: Double) {
+        current = seconds
+        // A seek per touch event would queue up behind the decoder; one every 40 ms is plenty for a smooth picture.
+        let now = CACurrentMediaTime()
+        guard now - lastScrub >= 0.04 else { return }
+        lastScrub = now
+        if let webm { webm.seek(to: seconds, rate: 0); return }
+        let tolerance = CMTime(seconds: 0.15, preferredTimescale: 600)
+        player.seek(to: CMTime(seconds: seconds, preferredTimescale: 600), toleranceBefore: tolerance, toleranceAfter: tolerance)
+    }
+
+    func toggleLoop() {
+        looping.toggle()
+        UserDefaults.standard.set(looping, forKey: "videoLoop")
+        if let webm {
+            // Back to the position within the video, so the clock starts counting from one pass again.
+            if !looping { webm.seek(to: webm.currentTime, rate: isPlaying ? Float(speed) : 0) }
+            webm.setLooping(looping)
+        } else if let asset, player.currentItem != nil {
+            if looping {
+                // The looper takes over the queue, so the video is put back where it was.
+                let at = current, wasPlaying = isPlaying
+                looper = AVPlayerLooper(player: player, templateItem: AVPlayerItem(asset: asset))
+                player.seek(to: CMTime(seconds: at, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero)
+                if wasPlaying { player.rate = Float(speed) }
+            } else {
+                // The pass that is playing finishes, and then it stops.
+                looper?.disableLooping()
+                looper = nil
+            }
+        }
+    }
+
+    func setSpeed(_ value: Double) {
+        speed = value
+        UserDefaults.standard.set(value, forKey: "videoSpeed")
+        if isPlaying { if let webm { webm.setRate(Float(value)) } else { player.rate = Float(value) } }
+    }
+
+    func stop() {
+        webm?.stop()
+        webm = nil
+        silentReason = nil
+        player.pause()
+        if let timeObserver { player.removeTimeObserver(timeObserver) }
+        timeObserver = nil
+        if let endObserver { NotificationCenter.default.removeObserver(endObserver) }
+        endObserver = nil
+        statusObservation = nil
+        looper?.disableLooping()
+        looper = nil
+        player.removeAllItems()
+        asset = nil
+        isPlaying = false
+        AudioSessionQueue.quiet()
+    }
+}
+
+/// Stops the swipeable pager from paging while a video is zoomed in, so a drag pans the picture instead.
+struct PagerLock: UIViewRepresentable {
+    let locked: Bool
+
+    final class Coordinator { weak var scroll: UIScrollView? }
+
+    func makeCoordinator() -> Coordinator { Coordinator() }
+
+    func makeUIView(context: Context) -> UIView {
+        let view = UIView()
+        view.isUserInteractionEnabled = false
+        return view
+    }
+
+    func updateUIView(_ view: UIView, context: Context) {
+        let coordinator = context.coordinator
+        DispatchQueue.main.async {
+            var parent = view.superview
+            while let candidate = parent {
+                if let scroll = candidate as? UIScrollView {
+                    scroll.isScrollEnabled = !locked
+                    coordinator.scroll = scroll
+                    return
+                }
+                parent = candidate.superview
+            }
+        }
+    }
+
+    /// When the page goes away the pager is given back, so it can never stay locked.
+    static func dismantleUIView(_ view: UIView, coordinator: Coordinator) {
+        coordinator.scroll?.isScrollEnabled = true
+    }
+}
+
+/// The viewer's video (or audio) player: pinch to zoom, drag to pan, double-tap to zoom in or out, a speed menu, a
+/// scrubber, and play and pause. Formats the system cannot play fall back to the open button.
+struct VideoViewer: View {
+    let item: LibraryItem
+    let active: Bool
+    @Binding var zoomed: Bool
+    /// While locked, every touch is ignored and the controls are hidden, except the button that unlocks.
+    @Binding var locked: Bool
+    /// Set while a finger is on the progress bar (see `ViewerOverlay`), so the viewer ignores its other gestures.
+    @Binding var scrubbing: Bool
+    /// A swipe that starts near the left or right edge slides this page away with the finger and asks for the previous
+    /// (-1) or next (+1) file. Without a neighbour on that side the page only gives a little and springs back.
+    var hasPrevious = false
+    var hasNext = false
+    /// Which way this page came in (+1 from the right, -1 from the left, 0 when it did not slide in): its picture slides
+    /// into place while the bar and buttons simply start afresh.
+    var enterFrom = 0
+    var onEdgeSwipe: (Int) -> Void = { _ in }
+    /// How far the page has been dragged sideways by an edge swipe.
+    @State private var edgeDrag: CGFloat = 0
+    /// While locked, a touch shows the unlock button for a moment.
+    @State private var unlockVisible = false
+    @State private var unlockTouches = 0
+
+    @StateObject private var controller = VideoController()
+    @State private var scale: CGFloat = 1
+    @State private var baseScale: CGFloat = 1
+    @State private var offset: CGSize = .zero
+    @State private var baseOffset: CGSize = .zero
+    @State private var controlsVisible = true
+    /// Set while a horizontal swipe scrubs through the video: where it started, whether it was playing, how far it moved.
+    @State private var scrubStart: (time: Double, wasPlaying: Bool)?
+    /// True only while a finger is on the progress bar. Swiping across the video does not set it.
+    @State private var barSeeking = false
+    @State private var scrubDelta = 0.0
+    @State private var landscape = false
+
+    private let maxScale: CGFloat = 5
+
+    var body: some View {
+        GeometryReader { geo in
+            ZStack {
+                Color.black
+                if controller.unplayable {
+                    Button { ShareSheet.present(item.fileURL) } label: {
+                        Image(systemName: item.isVideo ? "play.circle.fill" : "music.note")
+                            .font(.system(size: 64)).foregroundColor(.white).frame(width: 96, height: 96)
+                    }
+                    .accessibilityLabel(S.actionOpen)
+                } else {
+                    surface
+                        .scaleEffect(scale)
+                        .offset(offset)
+                        // Only the picture slides with an edge swipe; the bar and the buttons stay where they are.
+                        .offset(x: edgeDrag)
+                        .contentShape(Rectangle())
+                        .onTapGesture(count: 2) { if !locked { toggleZoom(in: geo.size) } }
+                        .onTapGesture {
+                            if locked { unlockTouches += 1 } else { withAnimation(.easeInOut(duration: 0.2)) { controlsVisible.toggle() } }
+                        }
+                        .simultaneousGesture(item.isVideo && !locked ? zoomGesture(in: geo.size) : nil)
+                        .simultaneousGesture(!locked ? panGesture(in: geo.size) : nil)
+                    if item.isAudio {
+                        Image(systemName: "music.note").font(.system(size: 64)).foregroundColor(Brand.onSurfaceVariant).allowsHitTesting(false)
+                    }
+                    if scrubStart != nil { scrubHud }
+                    if controlsVisible && !locked { controls.frame(maxHeight: .infinity, alignment: .bottom) }
+                    if locked && unlockVisible {
+                        Button {
+                            controlsVisible = true
+                            locked = false
+                        } label: {
+                            Image(systemName: "lock.open.fill").font(.system(size: 26, weight: .medium)).foregroundColor(.white)
+                                .frame(width: 64, height: 64).background(Circle().fill(Color.black.opacity(0.6)))
+                        }
+                        .accessibilityLabel(S.actionUnlock)
+                        .frame(maxHeight: .infinity, alignment: .bottom)
+                        .padding(.bottom, 70)
+                    }
+                }
+            }
+            .clipped()
+            .onAppear {
+                guard enterFrom != 0 else { return }
+                edgeDrag = CGFloat(enterFrom) * geo.size.width
+                withAnimation(.easeOut(duration: 0.22)) { edgeDrag = 0 }
+            }
+            .onChange(of: geo.size) { size in landscape = size.width > size.height }
+            .onChange(of: unlockTouches) { _ in
+                unlockVisible = true
+                let mark = unlockTouches
+                DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) { if mark == unlockTouches { unlockVisible = false } }
+            }
+        }
+        // Swiping sideways on a video scrubs it, so the pager never pages away from a video page.
+        // Only the page on screen may lock the pager: neighbours are built in advance and would otherwise lock it too.
+        .background { if active { PagerLock(locked: zoomed || item.isVideo || item.isAudio) } }
+        .onChange(of: barSeeking) { scrubbing = $0 }
+        .onDisappear { scrubbing = false }
+        .task(id: active) {
+            if active {
+                if item.isVideo { ScreenOrientation.allowRotation() }
+                await controller.load(item)
+                #if DEBUG
+                // `-testScrubHud 1` leaves the video paused at the scrub position, so the frame can be checked.
+                let holdPaused = ProcessInfo.processInfo.arguments.contains("-testScrubHud")
+                let defaults = UserDefaults.standard
+                if defaults.object(forKey: "testSpeed") != nil { controller.setSpeed(defaults.double(forKey: "testSpeed")) }
+                if defaults.object(forKey: "testZoom") != nil { setScale(CGFloat(defaults.double(forKey: "testZoom"))) }
+                if defaults.bool(forKey: "testScrubHud") {
+                    scrubStart = (0, false); scrubDelta = 3; controller.scrubbing = true; controller.scrub(to: 3)
+                }
+                if defaults.object(forKey: "testSeek") != nil { controller.seek(to: defaults.double(forKey: "testSeek")) }
+                // `-testLocked 1` locks the touch inputs, to check the locked screen.
+                if defaults.bool(forKey: "testLocked") { locked = true }
+                // `-testLandscape 1` turns the screen to landscape, like pressing the rotate button.
+                if defaults.bool(forKey: "testLandscape") {
+                    // `-testLandscapeAfter 4` waits that many seconds first, like a person pressing the button later.
+                    DispatchQueue.main.asyncAfter(deadline: .now() + defaults.double(forKey: "testLandscapeAfter")) { ScreenOrientation.rotate(toLandscape: true) }
+                }
+                #else
+                let holdPaused = false
+                #endif
+                if !holdPaused { controller.play() }
+            } else {
+                controller.stop()
+                reset()
+            }
+        }
+        // The screen goes back to portrait when the whole viewer closes (see ViewerOverlay), not when one page goes away.
+        .onDisappear { controller.stop() }
+    }
+
+    @ViewBuilder private var surface: some View {
+        if let webm = controller.webm { WebMSurface(player: webm) } else { VideoSurface(player: controller.player) }
+    }
+
+    // MARK: Zoom
+
+    private func zoomGesture(in size: CGSize) -> some Gesture {
+        MagnificationGesture()
+            .onChanged { value in setScale(baseScale * value, size: size) }
+            .onEnded { _ in
+                baseScale = scale
+                if scale < 1.05 { withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) { reset() } }
+            }
+    }
+
+    /// True when a drag starts in the outer fifth of the screen at either side, where a sideways swipe changes file.
+    private func startsAtEdge(_ value: DragGesture.Value, in size: CGSize) -> Bool {
+        value.startLocation.x < size.width * 0.2 || value.startLocation.x > size.width * 0.8
+    }
+
+    /// One drag, three jobs: zoomed in, it pans the picture; a sideways swipe in the middle scrubs through the video; one
+    /// that starts at the left or right edge moves to the previous or next file.
+    private func panGesture(in size: CGSize) -> some Gesture {
+        // Measured on the screen, not in the picture: the picture moves with the finger, and a drag measured inside a
+        // moving view would cancel itself out.
+        DragGesture(minimumDistance: 8, coordinateSpace: .global)
+            .onChanged { value in
+                if scale > 1.02 {
+                    offset = clamped(CGSize(width: baseOffset.width + value.translation.width, height: baseOffset.height + value.translation.height), in: size)
+                    return
+                }
+                if startsAtEdge(value, in: size) {
+                    // The page follows the finger, held back a little where there is no file to go to.
+                    guard scrubStart == nil, abs(value.translation.width) > abs(value.translation.height) else { return }
+                    let w = value.translation.width
+                    edgeDrag = (w < 0 && !hasNext) || (w > 0 && !hasPrevious) ? w * 0.3 : w
+                    return
+                }
+                // Only the middle of the screen scrubs.
+                guard item.isVideo, controller.duration > 0 else { return }
+                if scrubStart == nil {
+                    guard abs(value.translation.width) > abs(value.translation.height) else { return }
+                    scrubStart = (controller.current, controller.isPlaying)
+                    controller.scrubbing = true
+                    controller.pause()
+                }
+                guard let start = scrubStart else { return }
+                // Across the whole screen covers up to 90 seconds, or the whole video if it is shorter.
+                let span = min(max(controller.duration, 1), 90)
+                let target = min(max(start.time + Double(value.translation.width / max(size.width, 1)) * span, 0), controller.duration)
+                scrubDelta = target - start.time
+                controller.scrub(to: target)
+            }
+            .onEnded { value in
+                baseOffset = offset
+                if edgeDrag != 0 {
+                    let w = value.translation.width
+                    let step = w < 0 ? 1 : -1
+                    let hasTarget = step > 0 ? hasNext : hasPrevious
+                    if hasTarget, abs(w) > 56 || abs(value.predictedEndTranslation.width) > 160 {
+                        // The picture slides the rest of the way out, then the viewer brings in the next file.
+                        withAnimation(.easeIn(duration: 0.18)) { edgeDrag = step > 0 ? -size.width : size.width }
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.18) { onEdgeSwipe(step) }
+                    } else {
+                        withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) { edgeDrag = 0 }
+                    }
+                    return
+                }
+                guard let start = scrubStart else { return }
+                scrubStart = nil
+                controller.scrubbing = false
+                controller.seek(to: controller.current)
+                if start.wasPlaying { controller.play() }
+            }
+    }
+
+    private var scrubHud: some View {
+        VStack(spacing: 2) {
+            Text("\(scrubDelta >= 0 ? "+" : "-")\(format(abs(scrubDelta)))").textStyle(.titleMedium, color: .white)
+            Text("\(format(controller.current)) / \(format(controller.duration))").textStyle(.labelLarge, color: Color.white.opacity(0.85))
+        }
+        .padding(.horizontal, Spacing.md)
+        .padding(.vertical, Spacing.sm)
+        .background(Capsule().fill(Color.black.opacity(0.6)))
+        .allowsHitTesting(false)
+    }
+
+    private func setScale(_ value: CGFloat, size: CGSize = UIScreen.main.bounds.size) {
+        scale = min(max(value, 0.8), maxScale)
+        zoomed = scale > 1.02
+        offset = clamped(offset, in: size)
+    }
+
+    private func toggleZoom(in size: CGSize) {
+        withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) {
+            if scale > 1.02 { reset() } else { setScale(2.5, size: size); baseScale = scale }
+        }
+    }
+
+    private func reset() {
+        scale = 1; baseScale = 1; offset = .zero; baseOffset = .zero; zoomed = false
+    }
+
+    /// A zoomed picture can be dragged only until its edge meets the edge of the screen.
+    private func clamped(_ value: CGSize, in size: CGSize) -> CGSize {
+        let limitX = max(0, size.width * (scale - 1) / 2), limitY = max(0, size.height * (scale - 1) / 2)
+        return CGSize(width: min(max(value.width, -limitX), limitX), height: min(max(value.height, -limitY), limitY))
+    }
+
+    // MARK: Controls
+
+    private var controls: some View {
+        VStack(spacing: Spacing.xs) {
+            if let reason = controller.silentReason {
+                Label(reason, systemImage: "speaker.slash.fill")
+                    .textStyle(.labelMedium, color: .white)
+                    .padding(.horizontal, Spacing.sm).padding(.vertical, 6)
+                    .background(Capsule().fill(Color.white.opacity(0.18)))
+            }
+            transport
+            seekRow
+        }
+        .padding(.horizontal, Spacing.sm)
+        .padding(.top, Spacing.md)
+        .padding(.bottom, 28)
+        .background(LinearGradient(colors: [.clear, Color.black.opacity(0.7)], startPoint: .top, endPoint: .bottom))
+    }
+
+    /// All the buttons in one row, evenly spaced: loop, lock, back 10 s, play or pause, forward 10 s, speed, and for videos
+    /// rotate. The row is capped in width, so it looks the same in portrait and landscape.
+    private var transport: some View {
+        HStack(spacing: 0) {
+            Button { controller.toggleLoop() } label: {
+                Image(systemName: controller.looping ? "repeat.1" : "repeat")
+                    .font(.system(size: 20, weight: .medium))
+                    .foregroundColor(controller.looping ? Brand.primary : .white).frame(width: 44, height: 48)
+            }
+            .accessibilityLabel(controller.looping ? S.actionLoopOff : S.actionLoopOn)
+            Spacer(minLength: 0)
+            Button { locked = true } label: {
+                Image(systemName: "lock").font(.system(size: 20, weight: .medium)).foregroundColor(.white).frame(width: 44, height: 48)
+            }
+            .accessibilityLabel(S.actionLock)
+            Spacer(minLength: 0)
+            Button { controller.skip(by: -10) } label: {
+                Image(systemName: "gobackward.10").font(.system(size: 24, weight: .regular)).foregroundColor(.white).frame(width: 44, height: 48)
+            }
+            .accessibilityLabel(S.actionSkipBack)
+            Spacer(minLength: 0)
+            Button { controller.toggle() } label: {
+                Image(systemName: controller.isPlaying ? "pause.fill" : "play.fill")
+                    .font(.system(size: 28, weight: .semibold)).foregroundColor(.white).frame(width: 56, height: 56)
+            }
+            .accessibilityLabel(controller.isPlaying ? "Pause" : "Play")
+            Spacer(minLength: 0)
+            Button { controller.skip(by: 10) } label: {
+                Image(systemName: "goforward.10").font(.system(size: 24, weight: .regular)).foregroundColor(.white).frame(width: 44, height: 48)
+            }
+            .accessibilityLabel(S.actionSkipForward)
+            Spacer(minLength: 0)
+            speedMenu
+            if item.isVideo {
+                Spacer(minLength: 0)
+                Button { ScreenOrientation.rotate(toLandscape: !landscape) } label: {
+                    Image(systemName: landscape ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right")
+                        .font(.system(size: 20, weight: .medium)).foregroundColor(.white).frame(width: 44, height: 48)
+                }
+                .accessibilityLabel(landscape ? S.actionExitLandscape : S.actionLandscape)
+            }
+        }
+        .frame(maxWidth: 440)
+    }
+
+    private var seekRow: some View {
+        HStack(spacing: Spacing.sm) {
+            Text(format(controller.current)).textStyle(.labelMedium, color: .white).frame(minWidth: 36)
+            seekBar
+            Text(format(controller.duration)).textStyle(.labelMedium, color: .white).frame(minWidth: 36)
+        }
+    }
+
+    /// The progress bar. A touch anywhere on it jumps there at once, and dragging carries on from that point, showing the
+    /// picture at that moment live like swiping across the video does. It is the only way to seek in a zoomed-in video.
+    private var seekBar: some View {
+        GeometryReader { geo in
+            let thumb: CGFloat = 16
+            let span = max(geo.size.width - thumb, 1)
+            let end = max(controller.duration, 0.1)
+            let fraction = CGFloat(min(max(controller.current / end, 0), 1))
+            ZStack(alignment: .leading) {
+                Capsule().fill(Color.white.opacity(0.3)).frame(height: 4).padding(.horizontal, thumb / 2)
+                Capsule().fill(Brand.primary).frame(width: span * fraction, height: 4).padding(.leading, thumb / 2)
+                Circle().fill(Brand.primary).frame(width: thumb, height: thumb).offset(x: span * fraction)
+            }
+            .frame(maxHeight: .infinity)
+            .contentShape(Rectangle())
+            .gesture(
+                DragGesture(minimumDistance: 0)
+                    .onChanged { value in
+                        let target = Double(min(max((value.location.x - thumb / 2) / span, 0), 1)) * end
+                        if scrubStart == nil {
+                            scrubStart = (controller.current, controller.isPlaying)
+                            controller.scrubbing = true
+                            controller.pause()
+                        }
+                        barSeeking = true
+                        scrubDelta = target - (scrubStart?.time ?? target)
+                        controller.scrub(to: target)
+                    }
+                    .onEnded { value in
+                        let target = Double(min(max((value.location.x - thumb / 2) / span, 0), 1)) * end
+                        let wasPlaying = scrubStart?.wasPlaying ?? false
+                        barSeeking = false
+                        scrubStart = nil
+                        controller.scrubbing = false
+                        controller.seek(to: target)
+                        if wasPlaying { controller.play() }
+                    }
+            )
+        }
+        .frame(height: 44)
+    }
+
+    private var speedMenu: some View {
+        Menu {
+            ForEach(VideoController.speeds, id: \.self) { value in
+                Button { controller.setSpeed(value) } label: {
+                    if value == controller.speed { Label(speedLabel(value), systemImage: "checkmark") } else { Text(speedLabel(value)) }
+                }
+            }
+        } label: {
+            Text(speedLabel(controller.speed))
+                .textStyle(.labelLarge, color: .white)
+                .padding(.horizontal, 10)
+                .frame(height: 32)
+                .background(Capsule().fill(Color.white.opacity(0.18)))
+                .frame(minWidth: 44, minHeight: 48)
+                .contentShape(Rectangle())
+        }
+        .accessibilityLabel("Playback speed")
+    }
+
+    private func speedLabel(_ value: Double) -> String {
+        (value == value.rounded() ? String(Int(value)) : String(format: "%g", value)) + "×"
+    }
+
+    private func format(_ seconds: Double) -> String {
+        guard seconds.isFinite, seconds >= 0 else { return "0:00" }
+        let total = Int(seconds.rounded())
+        return String(format: "%d:%02d", total / 60, total % 60)
+    }
+}

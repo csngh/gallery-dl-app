@@ -1,0 +1,826 @@
+import AVKit
+import SwiftUI
+import UniformTypeIdentifiers
+
+struct OpenFolder: Equatable {
+    let id: Int64
+    let name: String
+}
+
+@MainActor
+final class LibraryViewModel: ObservableObject {
+    /// Search term for the folder list; the files of an open folder have their own.
+    @Published var query = ""
+    @Published var itemQuery = ""
+    @Published private(set) var openFolder: OpenFolder?
+    @Published private(set) var selection = Set<Int64>()
+    func open(_ folder: FolderSummary) {
+        itemQuery = ""
+        selection = []
+        openFolder = OpenFolder(id: folder.id, name: folder.displayName)
+    }
+
+    /// Back steps out of selection first, then out of the folder.
+    func back() {
+        if !selection.isEmpty { selection = [] } else { closeFolder() }
+    }
+
+    func closeFolder() {
+        itemQuery = ""
+        selection = []
+        openFolder = nil
+    }
+
+    func toggleSelected(_ id: Int64) {
+        if selection.contains(id) { selection.remove(id) } else { selection.insert(id) }
+    }
+
+    func clearSelection() { selection = [] }
+    func takeSelection() -> Set<Int64> { defer { selection = [] }; return selection }
+}
+
+struct LibraryScreen: View {
+    @EnvironmentObject private var store: AppStore
+    @EnvironmentObject private var settings: SettingsStore
+    @EnvironmentObject private var previews: PreviewHost
+    @ObservedObject var model: LibraryViewModel
+
+    var body: some View {
+        // The folder list stays in place underneath an open folder, so coming back lands where you left off instead of at the
+        // top. Its previews are paused while a folder is open.
+        ZStack {
+            FoldersContent(model: model).environment(\.previewsDisabled, model.openFolder != nil)
+            if let folder = model.openFolder {
+                // Swipe from the left edge to go back to the folders, which show underneath.
+                SwipeBackContainer(enabled: model.selection.isEmpty, onBack: { model.closeFolder() }, behind: {
+                    Color.clear
+                }, top: {
+                    FolderContent(model: model, folder: folder).appBackground()
+                })
+            }
+        }
+        // The preview clips of the whole library are made in the background while it is open, and the bar shows how far
+        // that has got. Leaving the library pauses the work that has not started.
+        .onAppear { startSweep() }
+        .onChange(of: settings.livePreviews) { on in if on { startSweep() } else { PreviewStripStore.shared.cancelSweep() } }
+        .onChange(of: store.items.count) { _ in startSweep() }
+        .onDisappear {
+            previews.releaseAll()
+            PreviewStripStore.shared.cancelSweep()
+        }
+        // Leave a folder once everything in it is gone (deleted here or elsewhere).
+        .onChange(of: store.items) { _ in
+            if let folder = model.openFolder, model.itemQuery.trimmingCharacters(in: .whitespaces).isEmpty,
+               store.items(inFolder: folder.id, query: "").isEmpty {
+                model.closeFolder()
+            }
+        }
+    }
+}
+
+extension LibraryScreen {
+    fileprivate func startSweep() {
+        guard settings.livePreviews else { return }
+        PreviewStripStore.shared.requestAll(store.items.filter(\.isVideo))
+    }
+}
+
+/// A slim bar that shows while preview clips are being made: "Preparing previews, 12 of 40".
+struct PreviewProgressBanner: View {
+    @ObservedObject private var progress = PreviewProgress.shared
+
+    var body: some View {
+        if progress.total > 0 {
+            VStack(spacing: Spacing.xs) {
+                HStack {
+                    Text(S.previewsPreparing).textStyle(.labelLarge, color: Brand.onSurfaceVariant)
+                    Spacer()
+                    Text(S.previewsProgress(min(progress.done, progress.total), progress.total)).textStyle(.labelLarge, color: Brand.onSurfaceVariant)
+                }
+                LinearProgress(value: Double(progress.done) / Double(progress.total))
+            }
+            .padding(.horizontal, Spacing.md)
+            .padding(.vertical, Spacing.xs)
+        }
+    }
+}
+
+/// What long-pressing a folder offers: give it a tag, or delete it.
+struct FolderActionsDialog: View {
+    @EnvironmentObject private var ui: UIState
+    let title: String
+    let onTag: () -> Void
+    let onDelete: () -> Void
+
+    var body: some View {
+        DialogCard(title: title) {
+            VStack(alignment: .leading, spacing: 0) {
+                TextPill(title: S.actionTagFolder, symbol: "tag") { ui.dismissDialog(); onTag() }
+                TextPill(title: S.actionDeleteFolder, symbol: "trash", color: ActionColors.negative) { ui.dismissDialog(); onDelete() }
+            }
+        } actions: {
+            TextPill(title: S.actionCancel, color: Brand.onSurfaceVariant) { ui.dismissDialog() }
+        }
+    }
+}
+
+/// Type the tag of a folder; it shows as "name / tag". Saving an empty tag takes the tag off.
+struct TagDialog: View {
+    @EnvironmentObject private var ui: UIState
+    @EnvironmentObject private var store: AppStore
+    let folderId: Int64
+    let initial: String?
+    @State private var text: String
+
+    init(folderId: Int64, initial: String?) {
+        self.folderId = folderId
+        self.initial = initial
+        _text = State(initialValue: initial ?? "")
+    }
+
+    var body: some View {
+        DialogCard(title: S.tagFolderTitle) {
+            OutlinedField(label: S.tagLabel, text: Binding(get: { text }, set: { text = String($0.prefix(40)) }), submitLabel: .done, onSubmit: save)
+                .padding(.top, 8)
+        } actions: {
+            TextPill(title: S.actionCancel, color: Brand.onSurfaceVariant) { ui.dismissDialog() }
+            FilledPill(
+                title: text.trimmingCharacters(in: .whitespaces).isEmpty && !(initial ?? "").isEmpty ? S.actionRemoveTag : S.actionSave,
+                container: ActionColors.positive, content: ActionColors.onPositive, action: save,
+            )
+        }
+    }
+
+    private func save() {
+        store.setFolderTag(folderId, tag: text)
+        ui.dismissDialog()
+    }
+}
+
+// MARK: - Favorites import
+
+/// Picks a favorites sheet saved by Export video links and imports it, with a dialog for the progress and the outcome.
+private struct FavoritesImportButton: View {
+    @EnvironmentObject private var app: AppModel
+    @EnvironmentObject private var ui: UIState
+
+    var body: some View {
+        IconButton(symbol: "square.and.arrow.down", color: Brand.onSurfaceVariant, label: S.actionImportFavorites) {
+            FilePicker.present(types: [.commaSeparatedText, .plainText, .text, .data]) { url in
+                let rows = app.readFavoritesSheet(from: url)
+                if rows.isEmpty {
+                    ui.present(NoticeDialog(title: S.actionImportFavorites, message: S.importFavoritesNone))
+                } else {
+                    // Nothing is imported until the person says yes; then it runs in the background.
+                    ui.present(ConfirmDialog(
+                        title: S.importFavoritesConfirmTitle, message: S.importFavoritesConfirmBody(rows.count),
+                        confirmLabel: S.actionImportConfirm, destructive: false,
+                    ) { app.startFavoritesImport(rows) })
+                }
+            }
+        }
+    }
+}
+
+/// Where a favorites import shows up while it runs in the background, and what it did afterwards. It sits on Library and
+/// Home alike, and the import can be stopped from here at any time.
+struct FavoritesImportBanner: View {
+    @EnvironmentObject private var app: AppModel
+
+    var body: some View {
+        switch app.favoritesTransfer {
+        case .importing(let done, let total, let stopping):
+            card {
+                HStack {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(S.importFavoritesTitle).textStyle(.titleSmall)
+                        Text(stopping ? S.importFavoritesStopping : S.importProgress(min(done, total), total))
+                            .textStyle(.bodySmall, color: Brand.onSurfaceVariant)
+                    }
+                    Spacer(minLength: Spacing.sm)
+                    if !stopping { TextPill(title: S.actionCancel, color: Brand.primary) { app.cancelFavoritesImport() } }
+                }
+                ProgressView(value: total == 0 ? 1 : Double(min(done, total)) / Double(total)).tint(Brand.primary)
+                if let step = app.favoritesStep {
+                    HStack {
+                        Text(step.lookingUp ? S.importLookingUp : step.name).textStyle(.bodySmall).lineLimit(1)
+                        Spacer(minLength: Spacing.sm)
+                        if !step.lookingUp {
+                            Text(step.length > 0 ? "\(min(100, Int(step.read * 100 / step.length)))%" : ByteCountFormatter.string(fromByteCount: step.read, countStyle: .file))
+                                .textStyle(.bodySmall, color: Brand.onSurfaceVariant)
+                        }
+                    }
+                    if !step.lookingUp, step.length > 0 {
+                        ProgressView(value: Double(min(step.read, step.length)) / Double(step.length)).tint(Brand.primary)
+                    } else {
+                        ProgressView().progressViewStyle(.linear).tint(Brand.primary)
+                    }
+                }
+            }
+        case .imported(let result, let stopped):
+            card {
+                HStack(alignment: .top) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(stopped ? S.importFavoritesStopped : S.importDoneTitle).textStyle(.titleSmall)
+                        Group {
+                            if result.added > 0 { Text(S.importFavoritesAdded(result.added)) }
+                            if result.duplicates > 0 { Text(S.importFavoritesDuplicates(result.duplicates)) }
+                            if result.failed > 0 { Text(S.importFavoritesFailed(result.failed)) }
+                            // Why each of the first few failed, so a file that "clearly exists" can be told apart from a dead link.
+                            ForEach(Array(result.failures.prefix(3).enumerated()), id: \.offset) { _, failure in
+                                Text("\(failure.name): \(failure.reason)")
+                            }
+                            if result.failed > 3 { Text("…and \(result.failed - 3) more") }
+                            if result.added + result.duplicates + result.failed == 0 { Text(S.importFavoritesNothingAdded) }
+                        }
+                        .textStyle(.bodySmall, color: Brand.onSurfaceVariant)
+                    }
+                    Spacer(minLength: Spacing.sm)
+                    TextPill(title: S.actionOk, color: Brand.primary) { app.dismissFavoritesTransfer() }
+                }
+            }
+        case nil:
+            EmptyView()
+        }
+    }
+
+    private func card<Content: View>(@ViewBuilder _ content: () -> Content) -> some View {
+        VStack(alignment: .leading, spacing: Spacing.xs) { content() }
+            .padding(.horizontal, Spacing.md)
+            .padding(.vertical, Spacing.sm)
+            .background(RoundedRectangle(cornerRadius: Radius.sm, style: .continuous).fill(Brand.surfaceContainerHigh))
+            .padding(.horizontal, Spacing.md)
+            .padding(.vertical, Spacing.xs)
+    }
+}
+
+/// A short message with an OK button.
+struct NoticeDialog: View {
+    @EnvironmentObject private var ui: UIState
+    let title: String
+    let message: String
+
+    var body: some View {
+        DialogCard(title: title) {
+            Text(message).textStyle(.bodyMedium, color: Brand.onSurfaceVariant)
+        } actions: { FilledPill(title: S.actionOk) { ui.dismissDialog() } }
+    }
+}
+
+// MARK: - Folder list
+
+private struct FoldersContent: View {
+    @EnvironmentObject private var store: AppStore
+    @EnvironmentObject private var settings: SettingsStore
+    @EnvironmentObject private var ui: UIState
+    @ObservedObject var model: LibraryViewModel
+
+    var body: some View {
+        let folders = store.folderSummaries(query: model.query, newestFirst: settings.libraryNewestFirst)
+        let videosByFolder = Dictionary(grouping: store.items.filter { $0.isVideo && $0.folderId != nil }, by: { $0.folderId! })
+        VStack(spacing: 0) {
+            TopBar(title: S.navLibrary) {
+                FavoritesImportButton()
+                listColumnsMenu
+            }
+            PreviewProgressBanner()
+            FavoritesImportBanner()
+            if searchVisible { SearchField(text: $model.query) }
+            if !store.loaded {
+                ShimmerGrid(minSize: 150, count: 4)
+            } else if folders.isEmpty {
+                if model.query.trimmingCharacters(in: .whitespaces).isEmpty {
+                    EmptyState(title: S.libraryEmptyTitle, message: S.libraryEmptyBody, symbol: "photo.on.rectangle.angled", tone: .violet)
+                } else {
+                    EmptyState(title: S.libraryNoResults, message: S.libraryNoResultsBody, symbol: "magnifyingglass", tone: .violet)
+                }
+            } else {
+                SoftScrollView {
+                    LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: Spacing.md), count: settings.libraryColumns), spacing: Spacing.md) {
+                        ForEach(folders) { folder in
+                            FolderCard(folder: folder, videos: videosByFolder[folder.id] ?? [])
+                                .onTapGesture { model.open(folder) }
+                                .onLongPressGesture { showActions(folder) }
+                        }
+                    }
+                    .padding(Spacing.md)
+                }
+            }
+        }
+    }
+
+    /// The grid button in the Library's top bar: choose how many columns the folders are shown in (2 or 3), and their date order.
+    private var listColumnsMenu: some View {
+        Menu {
+            ForEach(2...3, id: \.self) { count in
+                Button { settings.libraryColumns = count } label: {
+                    if count == settings.libraryColumns {
+                        Label(S.columnsOption(count), systemImage: "checkmark")
+                    } else {
+                        Text(S.columnsOption(count))
+                    }
+                }
+            }
+            Divider()
+            ForEach([true, false], id: \.self) { newest in
+                Button { settings.libraryNewestFirst = newest } label: {
+                    if newest == settings.libraryNewestFirst {
+                        Label(newest ? S.sortNewest : S.sortOldest, systemImage: "checkmark")
+                    } else {
+                        Text(newest ? S.sortNewest : S.sortOldest)
+                    }
+                }
+            }
+        } label: {
+            Image(systemName: "square.grid.2x2")
+                .font(.system(size: 20, weight: .medium))
+                .foregroundColor(Brand.onSurfaceVariant)
+                .frame(width: 48, height: 48)
+                .contentShape(Rectangle())
+        }
+        .accessibilityLabel(S.actionViewOptions)
+    }
+
+    /// What long-pressing a folder offers: give it a tag, or delete it.
+    private func showActions(_ folder: FolderSummary) {
+        ui.present(FolderActionsDialog(
+            title: folder.displayName,
+            onTag: { ui.present(TagDialog(folderId: folder.id, initial: folder.tag)) },
+            onDelete: { confirmDelete(folder) },
+        ))
+    }
+
+    private func confirmDelete(_ folder: FolderSummary) {
+        ui.present(ConfirmDialog(
+            title: S.deleteFolderTitle, message: S.deleteFolderMessage(folder.itemCount), confirmLabel: S.actionDelete,
+        ) { store.deleteFolder(folder.id) })
+    }
+}
+
+private struct FolderCard: View {
+    let folder: FolderSummary
+    let videos: [LibraryItem]
+
+    var body: some View {
+        // The square comes first and the content is laid over it, so a wide image can never stretch the tile.
+        Brand.surfaceVariant
+            .aspectRatio(1, contentMode: .fit)
+            .overlay(
+                Group {
+                    if let cover = folder.cover, cover.isVisual {
+                        GalleryImage(item: cover)
+                    } else {
+                        IconTile(symbol: "folder.fill", tone: .violet, size: TileSize.hero)
+                    }
+                }
+            )
+            // A folder with videos plays short pieces of a few of them, picked at random, over its cover.
+            .overlay(LivePreview(key: "folder-\(folder.id)", clips: videos))
+            .overlay(
+                // Name and count on the bottom strip. Long-pressing the card tags or deletes the folder.
+                VStack(alignment: .leading, spacing: 0) {
+                    Text(folder.title).textStyle(.titleSmall, color: .white).lineLimit(1)
+                    // With a tag as the title, the folder's own name follows the count.
+                    Text(folderSubtitle(folder.displayName, folder.tag).map { "\(S.folderItems(folder.itemCount)) · \($0)" } ?? S.folderItems(folder.itemCount))
+                        .textStyle(.labelMedium, color: Color.white.opacity(0.8)).lineLimit(1)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, Spacing.md)
+                .padding(.top, Spacing.lg)
+                .padding(.bottom, Spacing.md)
+                .background(LinearGradient(colors: [.clear, Color.black.opacity(0.75)], startPoint: .top, endPoint: .bottom)),
+                alignment: .bottomLeading,
+            )
+            .clipShape(RoundedRectangle(cornerRadius: Radius.md, style: .continuous))
+            .contentShape(RoundedRectangle(cornerRadius: Radius.md, style: .continuous))
+    }
+}
+
+/// The search box is hidden for now; the search itself stays for when it comes back.
+private let searchVisible = false
+
+private struct SearchField: View {
+    @Binding var text: String
+    var body: some View {
+        OutlinedField(label: S.searchLabel, text: $text)
+            .padding(.horizontal, Spacing.md)
+            .padding(.vertical, Spacing.xs)
+            .padding(.top, 6)
+    }
+}
+
+// MARK: - Folder contents
+
+private struct FolderContent: View {
+    @EnvironmentObject private var store: AppStore
+    @EnvironmentObject private var settings: SettingsStore
+    @EnvironmentObject private var ui: UIState
+    @ObservedObject var model: LibraryViewModel
+    let folder: OpenFolder
+
+    var body: some View {
+        let items = store.items(inFolder: folder.id, query: model.itemQuery, newestFirst: settings.folderNewestFirst)
+        let selecting = !model.selection.isEmpty
+        let tag = store.folders.first { $0.id == folder.id }?.tag
+        VStack(spacing: 0) {
+            TopBar(
+                title: selecting ? S.selectedCount(model.selection.count) : folderTitle(folder.name, tag),
+                subtitle: selecting ? nil : folderSubtitle(folder.name, tag),
+                leading: {
+                    IconButton(symbol: selecting ? "xmark" : "chevron.left", color: Brand.onSurface,
+                               label: selecting ? S.actionClose : S.actionBack) { model.back() }
+                },
+                trailing: {
+                    if selecting {
+                        // Details is about one file, so the i appears only while exactly one is selected.
+                        if model.selection.count == 1, let item = items.first(where: { model.selection.contains($0.id) }) {
+                            IconButton(symbol: "info.circle", color: Brand.onSurfaceVariant, label: S.actionDetails) { ui.present(ItemDetailsDialog(item: item)) }
+                        }
+                        // The files in Favorites are already copies kept in the app, so there is nothing to add them to.
+                        if !isFavoritesFolder(folder.name) {
+                            IconButton(symbol: "star", color: Brand.onSurfaceVariant, label: S.actionFavorite) {
+                                let chosen = items.filter { model.selection.contains($0.id) }
+                                model.clearSelection()
+                                let added = store.addFavorites(chosen)
+                                ui.present(FavoritesAddedDialog(added: added))
+                            }
+                        }
+                        IconButton(symbol: "square.and.arrow.up", color: Brand.onSurfaceVariant, label: S.actionShare) {
+                            ShareSheet.present(items.filter { model.selection.contains($0.id) }.map(\.fileURL))
+                        }
+                        IconButton(symbol: "trash", color: ActionColors.negative, label: S.actionDelete) { confirmDeleteSelected() }
+                    } else {
+                        // Favorites can be exported as a sheet of its videos' parent links and video links.
+                        if isFavoritesFolder(folder.name) {
+                            FavoritesImportButton()
+                            IconButton(symbol: "square.and.arrow.up", color: Brand.onSurfaceVariant, label: S.actionExportFavorites) {
+                                exportFavoriteVideos(items)
+                            }
+                        }
+                        IconButton(symbol: "tag", color: Brand.onSurfaceVariant, label: S.actionTagFolder) {
+                            ui.present(TagDialog(folderId: folder.id, initial: tag))
+                        }
+                        columnsMenu
+                    }
+                },
+            )
+            PreviewProgressBanner()
+            FavoritesImportBanner()
+            if searchVisible && !selecting { SearchField(text: $model.itemQuery) }
+            if items.isEmpty {
+                EmptyState(title: S.libraryNoResults, message: S.libraryNoResultsBody, symbol: "magnifyingglass", tone: .violet)
+            } else {
+                SoftScrollView {
+                    LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: Spacing.sm), count: settings.folderColumns), spacing: Spacing.sm) {
+                        ForEach(Array(items.enumerated()), id: \.element.id) { index, item in
+                            ThumbnailCell(item: item, selected: model.selection.contains(item.id))
+                                .onTapGesture {
+                                    if selecting {
+                                        model.toggleSelected(item.id)
+                                    } else {
+                                        ui.viewer = ViewerRequest(folderId: folder.id, query: model.itemQuery, startIndex: index)
+                                    }
+                                }
+                                .onLongPressGesture { model.toggleSelected(item.id) }
+                        }
+                    }
+                    .padding(Spacing.md)
+                }
+            }
+        }
+    }
+
+    /// The grid button in a folder's top bar: choose how many columns the files are shown in (2 to 4), and their date order.
+    private var columnsMenu: some View {
+        Menu {
+            ForEach(2...4, id: \.self) { count in
+                Button { settings.folderColumns = count } label: {
+                    if count == settings.folderColumns {
+                        Label(S.columnsOption(count), systemImage: "checkmark")
+                    } else {
+                        Text(S.columnsOption(count))
+                    }
+                }
+            }
+            Divider()
+            ForEach([true, false], id: \.self) { newest in
+                Button { settings.folderNewestFirst = newest } label: {
+                    if newest == settings.folderNewestFirst {
+                        Label(newest ? S.sortNewest : S.sortOldest, systemImage: "checkmark")
+                    } else {
+                        Text(newest ? S.sortNewest : S.sortOldest)
+                    }
+                }
+            }
+        } label: {
+            Image(systemName: "square.grid.2x2")
+                .font(.system(size: 20, weight: .medium))
+                .foregroundColor(Brand.onSurfaceVariant)
+                .frame(width: 48, height: 48)
+                .contentShape(Rectangle())
+        }
+        .accessibilityLabel(S.actionViewOptions)
+    }
+
+    /// Writes the videos of Favorites to a CSV sheet in the temporary folder and opens the share sheet for it.
+    private func exportFavoriteVideos(_ items: [LibraryItem]) {
+        let rows = items.filter(\.isVideo).sorted { $0.id < $1.id }.map { FavoriteRow(parent: originalSource($0.sourceUrl), video: $0.fileUrl ?? "", name: $0.displayName) }
+        guard !rows.isEmpty else { ui.present(TransferDialog(message: S.exportFavoritesEmpty)); return }
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent(S.exportFavoritesFileName)
+        guard (try? LinkList.formatFavoriteVideos(rows).write(to: url, atomically: true, encoding: .utf8)) != nil else {
+            ui.present(TransferDialog(message: S.transferFailed))
+            return
+        }
+        ShareSheet.present(url)
+    }
+
+    private func confirmDeleteSelected() {
+        let count = model.selection.count
+        ui.present(ConfirmDialog(
+            title: S.deleteSelectedTitle, message: S.deleteSelectedMessage(count), confirmLabel: S.actionDelete,
+        ) { store.deleteItems(model.takeSelection()) })
+    }
+}
+
+private struct ThumbnailCell: View {
+    @EnvironmentObject private var settings: SettingsStore
+    let item: LibraryItem
+    let selected: Bool
+
+    var body: some View {
+        Brand.surfaceVariant
+            .aspectRatio(1, contentMode: .fit)
+            .overlay(
+                Group {
+                    if item.isVisual {
+                        ZStack {
+                            GalleryImage(item: item)
+                            if item.isVideo {
+                                // Every video plays a silent live preview when it is on screen and has a turn.
+                                LivePreview(key: "item-\(item.id)", clips: [item])
+                                if settings.livePreviews {
+                                    Image(systemName: "play.circle.fill").font(.system(size: 20)).foregroundColor(Color.white.opacity(0.9))
+                                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading).padding(Spacing.xs)
+                                } else {
+                                    Image(systemName: "play.circle.fill").font(.system(size: 30)).foregroundColor(.white)
+                                }
+                            }
+                        }
+                    } else {
+                        IconTile(symbol: item.isAudio ? "music.note" : "doc.fill", tone: .blue, size: TileSize.large)
+                    }
+                }
+            )
+            .overlay(
+                ZStack(alignment: .topTrailing) {
+                    if selected {
+                        Brand.primary.opacity(0.35)
+                        Image(systemName: "checkmark.circle.fill").foregroundColor(.white).padding(Spacing.sm)
+                    }
+                }
+            )
+            .clipShape(RoundedRectangle(cornerRadius: Radius.sm, style: .continuous))
+            .contentShape(RoundedRectangle(cornerRadius: Radius.sm, style: .continuous))
+    }
+}
+
+// MARK: - Full-screen viewer
+
+/// The swipeable full-screen viewer. Images fill the screen; video and audio play in place; other files open in
+/// whatever app the user picks.
+struct ViewerOverlay: View {
+    @EnvironmentObject private var store: AppStore
+    @EnvironmentObject private var ui: UIState
+    @EnvironmentObject private var settings: SettingsStore
+    let request: ViewerRequest
+    @State private var page: Int
+
+    init(request: ViewerRequest) {
+        self.request = request
+        _page = State(initialValue: request.startIndex)
+    }
+
+    @State private var dragY: CGFloat = 0
+    /// True while the current video is zoomed in: paging, the edge swipe and swipe-down are off so drags pan the picture.
+    @State private var zoomed = false
+    /// The video player's touch lock: the top bar, swipe down and swipe back are off too.
+    @State private var locked = false
+    /// True while a finger is on a video's progress bar. Every other gesture of the viewer (swipe down to close, the edge
+    /// swipe back) stays off until the finger lifts, however far it wanders. Swiping across the video does not set it.
+    @State private var scrubbing = false
+    /// Files added to Favorites from here, so the star fills in at once.
+    @State private var favorited = Set<Int64>()
+    /// Which way the last edge swipe went (+1 to the next file, -1 to the previous), so the new picture slides in from there.
+    @State private var slide = 0
+
+    var body: some View {
+        let items = store.items(inFolder: request.folderId, query: request.query, newestFirst: settings.folderNewestFirst)
+        // Swipe from the left edge to close (only on the first file, so it never fights the paging between files).
+        // The edge swipe is only for pictures: dragging a playing video across the screen made it lag, and a video
+        // already has its own sideways swipe (scrubbing).
+        let onVideoPage = items.indices.contains(page) && (items[page].isVideo || items[page].isAudio)
+        SwipeBackContainer(enabled: page == 0 && !zoomed && !onVideoPage && !locked && !scrubbing, onBack: { ui.viewer = nil }) {
+            ZStack(alignment: .top) {
+                Color.black.opacity(1 - Double(min(dragY / 500, 0.7))).ignoresSafeArea()
+                if items.isEmpty {
+                    Color.clear.onAppear { ui.viewer = nil }
+                } else {
+                    Group {
+                        if onVideoPage {
+                            // A video page cannot be swiped to another file (a sideways swipe scrubs), so it is shown on
+                            // its own. Inside the swipeable pager, turning the screen could leave it half-way between two
+                            // pages, with two videos sharing one landscape screen.
+                            ViewerPage(
+                                item: items[page], active: true, zoomed: $zoomed, locked: $locked, scrubbing: $scrubbing,
+                                hasPrevious: page > 0, hasNext: page < items.count - 1, enterFrom: slide,
+                            ) { step in go(step, of: items.count) }
+                            // Moving from one video to the next must build a new player, not reuse this one.
+                            .id(items[page].id)
+                            .ignoresSafeArea()
+                        } else {
+                            TabView(selection: $page) {
+                                ForEach(Array(items.enumerated()), id: \.element.id) { index, item in
+                                    ViewerPage(item: item, active: index == page, zoomed: $zoomed, locked: $locked, scrubbing: $scrubbing).tag(index)
+                                }
+                            }
+                            .tabViewStyle(.page(indexDisplayMode: .never))
+                            .ignoresSafeArea()
+                        }
+                        // Zoomed in, the picture has the screen to itself: no title bar over it.
+                        if !locked && !zoomed { topBar(items) }
+                    }
+                    .offset(y: dragY)
+                }
+            }
+            // Swipe down to close, as in Photos: the picture follows the finger and the background fades.
+            .simultaneousGesture(
+                DragGesture(minimumDistance: 20)
+                    .onChanged { value in
+                        guard !zoomed, !locked, !scrubbing, value.translation.height > 0, abs(value.translation.height) > abs(value.translation.width) else { return }
+                        dragY = value.translation.height
+                    }
+                    .onEnded { value in
+                        guard dragY > 0 else { return }
+                        if value.translation.height > 140 || value.predictedEndTranslation.height > 450 {
+                            withAnimation(.easeOut(duration: 0.18)) { dragY = 900 }
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.18) { ui.viewer = nil }
+                        } else {
+                            withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) { dragY = 0 }
+                        }
+                    }
+            )
+            .onChange(of: scrubbing) { on in if on, dragY != 0 { withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) { dragY = 0 } } }
+            .onChange(of: page) { _ in zoomed = false }
+            .onChange(of: items.count) { count in
+                if count > 0 && page >= count { page = count - 1 }
+            }
+        }
+        // The viewer is full screen: the status bar steps aside while it is open.
+        .statusBarHidden(true)
+        // Closing the viewer puts the screen back to portrait (a video may have turned it to landscape).
+        .onDisappear { ScreenOrientation.lockPortrait() }
+    }
+
+    /// Moves to the previous (-1) or next (+1) file with a slide.
+    private func go(_ step: Int, of count: Int) {
+        let target = min(max(page + step, 0), count - 1)
+        guard target != page else { return }
+        // The next file's picture slides in from the side the finger was heading to; its bar and buttons start afresh.
+        slide = step
+        page = target
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { slide = 0 }
+    }
+
+    private func topBar(_ items: [LibraryItem]) -> some View {
+        let current = items[min(max(page, 0), items.count - 1)]
+        return HStack(spacing: Spacing.xs) {
+            IconButton(symbol: "chevron.left", color: .white, label: S.actionBack) { ui.viewer = nil }
+            Text(current.displayName).textStyle(.titleSmall, color: .white).lineLimit(1)
+            Spacer(minLength: 0)
+            let inFavorites = current.sourceUrl.hasPrefix("favorite:") || favorited.contains(current.id)
+            IconButton(symbol: inFavorites ? "star.fill" : "star", color: .white, label: S.actionFavorite) {
+                let added = inFavorites ? 0 : store.addFavorites([current])
+                if added > 0 { favorited.insert(current.id) }
+                ui.present(FavoritesAddedDialog(added: added))
+            }
+            // Open and Delete share one menu: deleting a file is not a one-tap icon beside a harmless one.
+            Menu {
+                Button { ui.present(ItemDetailsDialog(item: current)) } label: { Label(S.actionDetails, systemImage: "info.circle") }
+                Button { ShareSheet.present(current.fileURL) } label: { Label(S.actionShareSave, systemImage: "square.and.arrow.up") }
+                Button(role: .destructive) {
+                    ui.present(ConfirmDialog(
+                        title: S.deleteItemTitle, message: S.deleteItemMessage, confirmLabel: S.actionDelete,
+                    ) { store.deleteItems([current.id]) })
+                } label: { Label(S.actionDelete, systemImage: "trash") }
+            } label: {
+                Image(systemName: "ellipsis")
+                    .rotationEffect(.degrees(90))
+                    .font(.system(size: 20, weight: .bold))
+                    .foregroundColor(.white)
+                    .frame(width: 48, height: 48)
+                    .contentShape(Rectangle())
+            }
+            .accessibilityLabel(S.actionMore)
+        }
+        .padding(.horizontal, Spacing.xs)
+        .padding(.vertical, Spacing.xs)
+        .background(LinearGradient(colors: [Color.black.opacity(0.6), .clear], startPoint: .top, endPoint: .bottom).ignoresSafeArea())
+    }
+}
+
+private struct ViewerPage: View {
+    let item: LibraryItem
+    let active: Bool
+    @Binding var zoomed: Bool
+    @Binding var locked: Bool
+    @Binding var scrubbing: Bool
+    /// A swipe that starts near the left or right edge of a video asks for the previous (-1) or next (+1) file.
+    var hasPrevious = false
+    var hasNext = false
+    var enterFrom = 0
+    var onEdgeSwipe: (Int) -> Void = { _ in }
+
+    var body: some View {
+        ZStack {
+            Color.black
+            if item.isImage {
+                ZoomableImage(item: item, active: active, zoomed: $zoomed)
+            } else if item.isVideo || item.isAudio {
+                VideoViewer(item: item, active: active, zoomed: $zoomed, locked: $locked, scrubbing: $scrubbing, hasPrevious: hasPrevious, hasNext: hasNext, enterFrom: enterFrom, onEdgeSwipe: onEdgeSwipe)
+            } else {
+                OpenButton(item: item, symbol: "doc.fill")
+            }
+        }
+    }
+}
+
+private struct OpenButton: View {
+    let item: LibraryItem
+    let symbol: String
+    var body: some View {
+        Button { ShareSheet.present(item.fileURL) } label: {
+            Image(systemName: symbol).font(.system(size: 64)).foregroundColor(.white).frame(width: 96, height: 96)
+        }
+        .accessibilityLabel(S.actionOpen)
+    }
+}
+
+/// The system file picker. SwiftUI's own `fileImporter` is not used: on iOS 15 it keeps believing the picker is open when
+/// it is dismissed by swiping it down, and the button that opened it then never opens it again. This keeps no such state,
+/// so a picker that was swiped away or cancelled changes nothing.
+enum FilePicker {
+    private static var delegate: PickerDelegate?
+
+    @MainActor static func present(types: [UTType], onPick: @escaping (URL) -> Void) {
+        guard let scene = UIApplication.shared.connectedScenes.compactMap({ $0 as? UIWindowScene }).first,
+              var top = scene.windows.first(where: \.isKeyWindow)?.rootViewController else { return }
+        while let presented = top.presentedViewController { top = presented }
+        let picker = UIDocumentPickerViewController(forOpeningContentTypes: types, asCopy: false)
+        picker.allowsMultipleSelection = false
+        let handler = PickerDelegate(onPick: onPick)
+        picker.delegate = handler
+        // The picker only holds its delegate weakly.
+        delegate = handler
+        top.present(picker, animated: true)
+    }
+
+    private final class PickerDelegate: NSObject, UIDocumentPickerDelegate {
+        let onPick: (URL) -> Void
+        init(onPick: @escaping (URL) -> Void) { self.onPick = onPick }
+
+        func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) {
+            if let url = urls.first { onPick(url) }
+        }
+    }
+}
+
+/// The system share sheet, which is how a file is opened in another app on iOS.
+enum ShareSheet {
+    @MainActor static func present(_ url: URL) { present([url]) }
+
+    /// Several files at once; the sheet offers "Save to Files" as well as the apps that take files.
+    @MainActor static func present(_ urls: [URL]) {
+        guard !urls.isEmpty, let scene = UIApplication.shared.connectedScenes.compactMap({ $0 as? UIWindowScene }).first,
+              var top = scene.windows.first(where: \.isKeyWindow)?.rootViewController else { return }
+        while let presented = top.presentedViewController { top = presented }
+        top.present(UIActivityViewController(activityItems: urls, applicationActivities: nil), animated: true)
+    }
+}
+
+/// Says how many files went into Favorites, and closes itself.
+struct FavoritesAddedDialog: View {
+    @EnvironmentObject private var ui: UIState
+    let added: Int
+
+    var body: some View {
+        DialogCard(title: added > 0 ? S.favoritesAdded(added) : S.favoritesNoneAdded) {
+            EmptyView()
+        } actions: {
+            TextPill(title: S.actionClose, color: Brand.onSurfaceVariant) { ui.dismissDialog() }
+        }
+        .task {
+            try? await Task.sleep(nanoseconds: 1_600_000_000)
+            ui.dismissDialog()
+        }
+    }
+}
