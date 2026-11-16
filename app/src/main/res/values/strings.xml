@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name">Gallery DL Android</string>
+    <string name="app_name">Gallery DL App</string>
 
     <string name="nav_queue">Queue</string>
     <string name="nav_library">Library</string>
@@ -377,7 +377,7 @@
     <string name="about_gallery_dl_version">gallery-dl version</string>
     <string name="about_licences">Open-source software used: gallery-dl (GPL-2.0), Chaquopy (MIT), Coil, AndroidX and Jetpack Compose (Apache-2.0), and the Inter typeface (SIL Open Font License 1.1).</string>
 
-    <string name="share_title">Add to Gallery DL Android</string>
+    <string name="share_title">Add to Gallery DL App</string>
     <string name="share_checking">Checking the link.</string>
     <string name="share_no_link">No link was found in what you shared. Please share a link that starts with http or https.</string>
     <string name="share_added">Added. Please press Start in the app to download it.</string>

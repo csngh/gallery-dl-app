@@ -2,7 +2,7 @@ import Foundation
 
 /// Every piece of text the app shows, copied from the Android app's strings.xml so both read the same.
 enum S {
-    static let appName = "Gallery DL Android"
+    static let appName = "Gallery DL App"
     static let navHome = "Home", navQueue = "Queue", navLibrary = "Library", navActivity = "Activity"
 
     static let exportFileName = "gallery-dl-links.txt"

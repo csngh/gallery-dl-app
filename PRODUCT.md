@@ -37,7 +37,7 @@ gallery-dl runs inside the app (embedded Python), so there is no server, no back
 
 ## Brand Commitments
 
-The name is "Gallery DL Android". A logo lockup and master mark exist in `docs/brand/` (SVG and PNG, with the generator scripts). The app uses the Inter font and a Material 3 dark scheme. These are existing assets, not fixed visual direction for new work.
+The name is "Gallery DL App". A logo lockup and master mark exist in `docs/brand/` (SVG and PNG, with the generator scripts). The app uses the Inter font and a Material 3 dark scheme. These are existing assets, not fixed visual direction for new work.
 
 ## Evidence on Hand
 

@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="docs/brand/logo-lockup.png" alt="Gallery DL Android" width="560">
+<img src="docs/brand/logo-lockup.png" alt="Gallery DL App" width="560">
 
 ### A native Android and iPhone front end and download manager for [gallery-dl](https://github.com/mikf/gallery-dl)
 

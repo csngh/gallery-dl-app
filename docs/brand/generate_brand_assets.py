@@ -94,7 +94,7 @@ def render_mark(size: int, zoom: float = 1.0, corner: float = 0.0, ss: int = 4) 
 
 # ------------------------------------------------------------------ lockup
 LOCKUP_W, LOCKUP_H, MARK = 1440, 360, 240
-TEXT_SIZE, LABEL = 118, "Gallery DL Android"
+TEXT_SIZE, LABEL = 118, "Gallery DL App"
 WGHT, OPSZ = 700, 32
 
 

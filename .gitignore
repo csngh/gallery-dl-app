@@ -36,3 +36,8 @@ ios/GalleryDL/Info.plist
 xcuserdata/
 DerivedData/
 ios/dist/
+
+# Local assistant and design notes
+.impeccable/
+CLAUDE.md
+PRODUCT.md
