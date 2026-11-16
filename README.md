@@ -37,7 +37,7 @@ Paste a link, press **Start**, and it becomes a folder you can browse and play, 
 
 ## Releases
 
-Ready-made apps are on the [Releases page](https://github.com/csngh/gallery-dl-android/releases). Download the one for your device:
+Ready-made apps are on the [Releases page](https://github.com/csngh/gallery-dl-app/releases). Download the one for your device:
 
 | File | For |
 | --- | --- |
