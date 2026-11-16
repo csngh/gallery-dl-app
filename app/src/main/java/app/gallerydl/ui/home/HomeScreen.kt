@@ -430,7 +430,7 @@ internal fun SiteTile(site: String, iconHost: String?, modifier: Modifier = Modi
 /** Tones with no fixed meaning, so a website never looks like a success or a failure. */
 private val SiteTones = listOf(Tone.Blue, Tone.Violet, Tone.Teal, Tone.Pink)
 
-/** "imgur" becomes "Imgur"; a host such as "upload.wikimedia.org" is shown as it is. */
+/** "example" becomes "Example"; a host such as "upload.example.org" is shown as it is. */
 internal fun String.displayName(): String =
     if ('.' in this) this else replaceFirstChar { it.uppercase() }
 

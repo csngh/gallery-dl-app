@@ -129,7 +129,7 @@ fun folderSubtitle(displayName: String, tag: String?): String? =
 fun cleanFolderName(raw: String?): String? =
     raw?.replace(Regex("[\\\\/:*?\"<>|\\u0000-\\u001F]+"), "_")?.trim()?.trim('.')?.take(120)?.trim()?.takeIf { it.isNotEmpty() }
 
-/** Folder name for one link: host plus the last two path segments, e.g. "imgur.com_a_AbC123". */
+/** Folder name for one link: host plus the last two path segments, e.g. "example.com_a_AbC123". */
 fun linkFolderName(url: String): String {
     val uri = Uri.parse(url)
     val host = uri.host.orEmpty().removePrefix("www.")

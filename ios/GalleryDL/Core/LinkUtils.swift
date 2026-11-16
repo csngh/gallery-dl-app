@@ -22,7 +22,7 @@ func parseLink(_ raw: String) -> URLComponents? {
     return URLComponents(string: encoded)
 }
 
-/// The host of a link without "www.", for example "upload.wikimedia.org".
+/// The host of a link without "www.", for example "upload.example.org".
 func hostOf(_ url: String) -> String {
     let host = stripWww(parseLink(url)?.host?.lowercased() ?? "")
     return host.isEmpty ? "other" : host
@@ -37,7 +37,7 @@ func siteKeyFor(category: String?, url: String) -> String {
 /// Second-level labels such as the "co" in example.co.uk, so those sites keep three labels.
 private let secondLevelLabels: Set<String> = ["co", "com", "org", "net", "gov", "edu", "ac", "ne", "or"]
 
-/// The host to ask for a website icon: the site's main domain (i.imgur.com becomes imgur.com). Nil for
+/// The host to ask for a website icon: the site's main domain (i.example.com becomes example.com). Nil for
 /// addresses that have no public icon, such as localhost and IP addresses.
 func iconHostOf(_ url: String) -> String? {
     guard let host = parseLink(url)?.host?.lowercased() else { return nil }
@@ -48,7 +48,7 @@ func iconHostOf(_ url: String) -> String? {
     return labels.suffix(keep).joined(separator: ".")
 }
 
-/// "imgur" becomes "Imgur"; a host such as "upload.wikimedia.org" is shown as it is.
+/// "example" becomes "Example"; a host such as "upload.example.org" is shown as it is.
 func siteDisplayName(_ site: String) -> String {
     site.contains(".") ? site : site.prefix(1).uppercased() + site.dropFirst()
 }
@@ -65,7 +65,7 @@ func folderSubtitle(_ displayName: String, _ tag: String?) -> String? {
     return displayName
 }
 
-/// Folder name for one link: host plus the last two path segments, e.g. "imgur.com_a_AbC123".
+/// Folder name for one link: host plus the last two path segments, e.g. "example.com_a_AbC123".
 /// The library folder of saved favourites. Its files are copies kept inside the app, so they outlive the link they came from.
 let favoritesFolder = "Favorites"
 private let favoritePrefix = "favorite:"

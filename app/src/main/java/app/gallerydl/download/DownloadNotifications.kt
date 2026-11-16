@@ -136,7 +136,7 @@ class DownloadNotifications(private val context: Context) {
 
     private fun percentSuffix(percent: Int) = if (percent >= 0) " · " + context.getString(R.string.progress_percent, percent) else ""
 
-    /** "imgur" becomes "Imgur"; a host such as "upload.wikimedia.org" is shown as it is. */
+    /** "example" becomes "Example"; a host such as "upload.example.org" is shown as it is. */
     private fun siteTitle(task: DownloadTask): String {
         val site = task.site ?: hostOf(task.url)
         return if ('.' in site) site else site.replaceFirstChar { it.uppercase() }

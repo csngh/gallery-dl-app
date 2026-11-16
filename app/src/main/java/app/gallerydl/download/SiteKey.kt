@@ -6,13 +6,13 @@ import app.gallerydl.data.DownloadTask
 /** gallery-dl categories that describe a kind of link rather than a website; these are grouped by host. */
 private val HOST_BASED_CATEGORIES = setOf("", "directlink", "generic", "recursive", "ytdl", "noop", "urls", "text")
 
-/** The host of a link without "www.", for example "upload.wikimedia.org". */
+/** The host of a link without "www.", for example "upload.example.org". */
 fun hostOf(url: String): String =
     Uri.parse(url).host?.removePrefix("www.")?.lowercase().orEmpty().ifEmpty { "other" }
 
 /**
- * The website a link belongs to. gallery-dl knows the site behind a link (for example "imgur" for both
- * imgur.com and i.imgur.com), so its category is used where it names a website, and the host otherwise.
+ * The website a link belongs to. gallery-dl knows the site behind a link (for example "example" for both
+ * example.com and i.example.com), so its category is used where it names a website, and the host otherwise.
  */
 fun siteKeyFor(category: String?, url: String): String =
     category?.lowercase()?.takeIf { it !in HOST_BASED_CATEGORIES } ?: hostOf(url)
@@ -24,7 +24,7 @@ val DownloadTask.siteKey: String get() = site ?: hostOf(url)
 private val SECOND_LEVEL_LABELS = setOf("co", "com", "org", "net", "gov", "edu", "ac", "ne", "or")
 
 /**
- * The host to ask for a website icon: the site's main domain (i.imgur.com becomes imgur.com). Null for
+ * The host to ask for a website icon: the site's main domain (i.example.com becomes example.com). Null for
  * addresses that have no public icon, such as localhost and IP addresses.
  */
 fun iconHostOf(url: String): String? {

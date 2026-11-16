@@ -169,8 +169,8 @@ Ready-made apps are on the [Releases page](https://github.com/csngh/gallery-dl-a
 
 ### Android TV
 
-- A separate TV build appears on the TV home screen with a banner and does not need a touchscreen; use a mouse or a
-  touch-capable remote.
+- A separate TV build appears on the TV home screen with a banner and does not need a touchscreen; it works with a remote
+  (D-pad), a mouse or a touch-capable remote.
 - Wide screens (TV, tablets, landscape) show the folder list on the left (one column, 20%) and the open folder on the
   right (80%).
 
@@ -214,10 +214,8 @@ links, and the folder tags work as described above.
 - Private or login-gated content needs a cookies.txt exported from your browser (Settings > Accounts); there is no
   in-app login.
 - No overall percentage for links that expand into many other links (profiles, threads); those show per-file progress.
-- Images in the viewer cannot be zoomed yet (videos can).
 - The library search box is hidden for now.
-- On a video page, swiping scrubs instead of moving to the next file; go back to the grid to open another one.
-- The TV build is made for a mouse or touch input; it has no remote (D-pad) focus navigation.
+- On a video page, swiping across the picture scrubs; to move to the next or previous file, swipe from the left or right edge of the screen.
 - Preview clips are made on the device after a download; on a very slow phone the first visit to a large library takes a
   while (it keeps going in the background).
 
