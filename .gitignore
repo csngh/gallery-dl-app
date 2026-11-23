@@ -36,6 +36,11 @@ ios/GalleryDL/Info.plist
 xcuserdata/
 DerivedData/
 ios/dist/
+# Local Linux builds with xtool (linux/), and the files xtool writes into ios/
+linux/
+ios/xtool/
+ios/xtool.yml
+ios/.bsp/
 
 # Local assistant and design notes
 .impeccable/
