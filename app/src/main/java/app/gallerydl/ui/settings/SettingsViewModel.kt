@@ -9,6 +9,8 @@ import app.gallerydl.data.DownloadRepository
 import app.gallerydl.data.SettingsRepository
 import app.gallerydl.download.GalleryDlOptions
 import app.gallerydl.download.PythonBridge
+import app.gallerydl.download.PluginSnapshot
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -21,6 +23,12 @@ import kotlinx.coroutines.withContext
 data class AboutInfo(val appVersion: String, val galleryDlVersion: String)
 
 enum class CookieImport { INVALID }
+
+internal data class PluginSettingsState(
+    val snapshot: PluginSnapshot? = null,
+    val busy: Boolean = false,
+    val error: String? = null,
+)
 
 class SettingsViewModel(
     private val settings: SettingsRepository,
@@ -53,6 +61,23 @@ class SettingsViewModel(
 
     private val _about = MutableStateFlow<AboutInfo?>(null)
     val about: StateFlow<AboutInfo?> = _about.asStateFlow()
+    private val _plugins = MutableStateFlow(PluginSettingsState())
+    internal val plugins = _plugins.asStateFlow()
+
+    internal fun updatePlugins(action: String, id: String? = null, enabled: Boolean? = null, uri: Uri? = null) {
+        if (_plugins.value.busy) return
+        _plugins.update { it.copy(busy = true, error = null) }
+        viewModelScope.launch {
+            try {
+                val snapshot = withContext(Dispatchers.IO) { bridge.plugins(action, id, enabled, uri) }
+                _plugins.value = PluginSettingsState(snapshot = snapshot)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Exception) {
+                _plugins.update { it.copy(busy = false, error = failure.localizedMessage ?: "Could not update extractor plugins.") }
+            }
+        }
+    }
 
     init {
         refreshRecords()
@@ -90,6 +115,7 @@ class SettingsViewModel(
     }
 
     fun setStartupSound(on: Boolean) = viewModelScope.launch { settings.setStartupSound(on) }
+    fun setDarkAppearance(dark: Boolean) = viewModelScope.launch { settings.setDarkAppearance(dark) }
     fun setLivePreviews(on: Boolean) = viewModelScope.launch { settings.setLivePreviews(on) }
     fun setPreviewSpeed(speed: Float) = viewModelScope.launch { settings.setPreviewSpeed(speed) }
     fun setApiRest(on: Boolean) = viewModelScope.launch { settings.setApiRest(on) }

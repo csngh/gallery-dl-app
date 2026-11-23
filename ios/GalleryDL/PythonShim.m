@@ -1,4 +1,5 @@
 #import "PythonShim.h"
+#import <TargetConditionals.h>
 #include <Python/Python.h>
 
 static NSString *ErrorJSON(NSString *message) {
@@ -60,7 +61,14 @@ BOOL GDLStartPython(NSString *bundlePath, NSString **error) {
     config.buffered_stdio = 0;
     config.module_search_paths_set = 1;
 
+#if TARGET_OS_OSX
+    // A Mac app keeps Python as a normal framework, and its own code and packages in Resources.
+    NSString *home = [[NSBundle mainBundle].privateFrameworksPath stringByAppendingPathComponent:@"Python.framework/Versions/3.13"];
+    NSString *resources = [NSBundle mainBundle].resourcePath;
+#else
     NSString *home = [bundlePath stringByAppendingPathComponent:@"python"];
+    NSString *resources = bundlePath;
+#endif
     status = PyConfig_SetBytesString(&config, &config.home, home.UTF8String);
     if (PyStatus_Exception(status)) {
         if (error) *error = StatusMessage(status, &config);
@@ -72,8 +80,8 @@ BOOL GDLStartPython(NSString *bundlePath, NSString **error) {
         [stdlib stringByAppendingString:@".zip"],
         stdlib,
         [stdlib stringByAppendingPathComponent:@"lib-dynload"],
-        [bundlePath stringByAppendingPathComponent:@"app"],
-        [bundlePath stringByAppendingPathComponent:@"app_packages"],
+        [resources stringByAppendingPathComponent:@"app"],
+        [resources stringByAppendingPathComponent:@"app_packages"],
     ];
     for (NSString *path in paths) {
         wchar_t *wide = Py_DecodeLocale(path.UTF8String, NULL);

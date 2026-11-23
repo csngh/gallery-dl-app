@@ -8,8 +8,10 @@ final class StartupSound {
 
     func play() {
         guard let url = Bundle.main.url(forResource: "splash_download", withExtension: "wav") else { return }
+        #if os(iOS)
         try? AVAudioSession.sharedInstance().setCategory(.ambient, mode: .default, options: [.mixWithOthers])
         try? AVAudioSession.sharedInstance().setActive(true)
+        #endif
         player = try? AVAudioPlayer(contentsOf: url)
         player?.prepareToPlay()
         player?.play()

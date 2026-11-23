@@ -54,9 +54,11 @@ import app.gallerydl.ui.AppViewModelProvider
 import app.gallerydl.ui.components.ConfirmDialog
 import app.gallerydl.ui.components.ScreenTitle
 import app.gallerydl.ui.components.ShimmerCardList
+import app.gallerydl.ui.components.focusRing
 import app.gallerydl.ui.components.readableWidth
 import app.gallerydl.ui.components.softScrollEdges
 import app.gallerydl.ui.theme.ActionColors
+import app.gallerydl.ui.theme.LocalDarkAppearance
 import app.gallerydl.ui.theme.Spacing
 
 /** Settings actions that ask for confirmation first. */
@@ -107,6 +109,20 @@ fun SettingsScreen(onBack: () -> Unit, viewModel: SettingsViewModel = viewModel(
             verticalArrangement = Arrangement.spacedBy(Spacing.Lg),
         ) {
             Section(R.string.settings_appearance_title, R.string.settings_appearance_body) {
+                val darkAppearance = LocalDarkAppearance.current
+                Text(stringResource(R.string.option_theme_title), style = MaterialTheme.typography.titleSmall)
+                SingleChoiceSegmentedButtonRow {
+                    listOf(true to R.string.option_theme_dark, false to R.string.option_theme_light).forEachIndexed { index, (dark, label) ->
+                        val shape = SegmentedButtonDefaults.itemShape(index, 2)
+                        SegmentedButton(
+                            selected = darkAppearance == dark,
+                            onClick = { viewModel.setDarkAppearance(dark) },
+                            shape = shape,
+                            modifier = Modifier.focusRing(shape),
+                        ) { Text(stringResource(label)) }
+                    }
+                }
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
                 SwitchRow(
                     R.string.option_startup_sound_title,
                     R.string.option_startup_sound_body,
@@ -207,6 +223,10 @@ fun SettingsScreen(onBack: () -> Unit, viewModel: SettingsViewModel = viewModel(
 
             Section(R.string.settings_sites_title, R.string.settings_sites_body) {
                 SwitchRow(R.string.option_api_rest_title, R.string.option_api_rest_body, current.apiRest, viewModel::setApiRest)
+            }
+
+            Section(R.string.settings_plugins_title, R.string.settings_plugins_body) {
+                ExtractorPluginsSettings(viewModel)
             }
 
             Section(R.string.settings_accounts_title, R.string.settings_accounts_body) {

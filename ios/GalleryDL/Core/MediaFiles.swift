@@ -1,10 +1,22 @@
 import AVFoundation
+#if canImport(UIKit)
 import UIKit
+#else
+import AppKit
+#endif
 
 /// Where downloaded files live: the app's private Application Support folder, never the Files app.
 enum MediaFiles {
     static let support: URL = {
-        let url = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        var url = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        #if os(macOS)
+        // The Mac app is not sandboxed, so this is the one folder every app shares: its files get a folder of their own.
+        url = url.appendingPathComponent("Gallery DL", isDirectory: true)
+        #endif
+        #if DEBUG
+        // `GDL_DATA_DIR=/some/folder` keeps a test run's files apart from the real library.
+        if let override = ProcessInfo.processInfo.environment["GDL_DATA_DIR"] { url = URL(fileURLWithPath: override, isDirectory: true) }
+        #endif
         try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
         return url
     }()
@@ -132,10 +144,10 @@ enum MediaFiles {
 
 /// Full-size images for the viewer. Thumbnails live in `ThumbnailStore`.
 enum FullImages {
-    static func image(for item: LibraryItem) async -> UIImage? {
+    static func image(for item: LibraryItem) async -> PlatformImage? {
         let url = item.fileURL
         return await Task.detached(priority: .userInitiated) {
-            UIImage(contentsOfFile: url.path)?.preparingForDisplay()
+            PlatformImage(contentsOfFile: url.path)?.preparingForDisplay()
         }.value
     }
 }

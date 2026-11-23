@@ -9,6 +9,7 @@ private enum AudioSessionQueue {
 
     /// Sound on, mixing off: this is the one place the app plays audio on purpose.
     static func playback() async {
+        #if os(iOS)
         await withCheckedContinuation { continuation in
             queue.async {
                 let session = AVAudioSession.sharedInstance()
@@ -18,15 +19,19 @@ private enum AudioSessionQueue {
                 continuation.resume()
             }
         }
+        #endif
     }
 
     /// The quiet category the live previews use, so they never interrupt the user's music.
     static func quiet() {
+        #if os(iOS)
         queue.async { try? AVAudioSession.sharedInstance().setCategory(.ambient, mode: .default, options: [.mixWithOthers]) }
+        #endif
     }
 }
 
 /// A layer-backed view that shows a player's video, letterboxed to fit.
+#if canImport(UIKit)
 private final class VideoLayerView: UIView {
     override class var layerClass: AnyClass { AVPlayerLayer.self }
     var playerLayer: AVPlayerLayer { layer as! AVPlayerLayer }
@@ -46,7 +51,36 @@ private struct VideoSurface: UIViewRepresentable {
 
     static func dismantleUIView(_ view: VideoLayerView, coordinator: ()) { view.playerLayer.player = nil }
 }
+#else
+private final class VideoLayerView: NSView {
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        wantsLayer = true
+    }
 
+    required init?(coder: NSCoder) { fatalError("not used") }
+
+    override func makeBackingLayer() -> CALayer { AVPlayerLayer() }
+    var playerLayer: AVPlayerLayer { layer as! AVPlayerLayer }
+}
+
+private struct VideoSurface: NSViewRepresentable {
+    let player: AVPlayer
+
+    func makeNSView(context: Context) -> VideoLayerView {
+        let view = VideoLayerView()
+        view.playerLayer.player = player
+        view.playerLayer.videoGravity = .resizeAspect
+        return view
+    }
+
+    func updateNSView(_ view: VideoLayerView, context: Context) {}
+
+    static func dismantleNSView(_ view: VideoLayerView, coordinator: ()) { view.playerLayer.player = nil }
+}
+#endif
+
+#if canImport(UIKit)
 private struct WebMSurface: UIViewRepresentable {
     let player: WebMPlayer
 
@@ -67,6 +101,28 @@ private struct WebMSurface: UIViewRepresentable {
 
     static func dismantleUIView(_ view: WebMSurfaceView, coordinator: Coordinator) { coordinator.player.detach(view.displayLayer) }
 }
+#else
+private struct WebMSurface: NSViewRepresentable {
+    let player: WebMPlayer
+
+    final class Coordinator {
+        let player: WebMPlayer
+        init(_ player: WebMPlayer) { self.player = player }
+    }
+
+    func makeCoordinator() -> Coordinator { Coordinator(player) }
+
+    func makeNSView(context: Context) -> WebMSurfaceView {
+        let view = WebMSurfaceView()
+        player.attach(view.displayLayer)
+        return view
+    }
+
+    func updateNSView(_ view: WebMSurfaceView, context: Context) {}
+
+    static func dismantleNSView(_ view: WebMSurfaceView, coordinator: Coordinator) { coordinator.player.detach(view.displayLayer) }
+}
+#endif
 
 /// Owns the player of the full-screen viewer: play and pause, seeking, and the playback speed.
 @MainActor
@@ -260,6 +316,7 @@ final class VideoController: ObservableObject {
 }
 
 /// Stops the swipeable pager from paging while a video is zoomed in, so a drag pans the picture instead.
+#if canImport(UIKit)
 struct PagerLock: UIViewRepresentable {
     let locked: Bool
 
@@ -293,6 +350,13 @@ struct PagerLock: UIViewRepresentable {
         coordinator.scroll?.isScrollEnabled = true
     }
 }
+#else
+/// The Mac viewer has no swipeable pager to lock; files are changed with the arrow keys.
+struct PagerLock: View {
+    let locked: Bool
+    var body: some View { EmptyView() }
+}
+#endif
 
 /// The viewer's video (or audio) player: pinch to zoom, drag to pan, double-tap to zoom in or out, a speed menu, a
 /// scrubber, and play and pause. Formats the system cannot play fall back to the open button.
@@ -357,7 +421,7 @@ struct VideoViewer: View {
                         .simultaneousGesture(item.isVideo && !locked ? zoomGesture(in: geo.size) : nil)
                         .simultaneousGesture(!locked ? panGesture(in: geo.size) : nil)
                     if item.isAudio {
-                        Image(systemName: "music.note").font(.system(size: 64)).foregroundColor(Brand.onSurfaceVariant).allowsHitTesting(false)
+                        Image(systemName: "music.note").font(.system(size: 64)).foregroundColor(.white.opacity(0.6)).allowsHitTesting(false)
                     }
                     if scrubStart != nil { scrubHud }
                     if controlsVisible && !locked { controls.frame(maxHeight: .infinity, alignment: .bottom) }
@@ -393,6 +457,12 @@ struct VideoViewer: View {
         .background { if active { PagerLock(locked: zoomed || item.isVideo || item.isAudio) } }
         .onChange(of: barSeeking) { scrubbing = $0 }
         .onDisappear { scrubbing = false }
+        // On the Mac the space bar plays and pauses, as in every other player.
+        .background {
+            if Platform.isMac {
+                Button("") { controller.toggle() }.keyboardShortcut(.space, modifiers: []).opacity(0).allowsHitTesting(false)
+            }
+        }
         .task(id: active) {
             if active {
                 if item.isVideo { ScreenOrientation.allowRotation() }
@@ -514,7 +584,7 @@ struct VideoViewer: View {
         .allowsHitTesting(false)
     }
 
-    private func setScale(_ value: CGFloat, size: CGSize = UIScreen.main.bounds.size) {
+    private func setScale(_ value: CGFloat, size: CGSize = Platform.screenSize) {
         scale = min(max(value, 0.8), maxScale)
         zoomed = scale > 1.02
         offset = clamped(offset, in: size)
@@ -562,7 +632,7 @@ struct VideoViewer: View {
             Button { controller.toggleLoop() } label: {
                 Image(systemName: controller.looping ? "repeat.1" : "repeat")
                     .font(.system(size: 20, weight: .medium))
-                    .foregroundColor(controller.looping ? Brand.primary : .white).frame(width: 44, height: 48)
+                    .foregroundColor(controller.looping ? Brand.playbackAccent : .white).frame(width: 44, height: 48)
             }
             .accessibilityLabel(controller.looping ? S.actionLoopOff : S.actionLoopOn)
             Spacer(minLength: 0)
@@ -588,7 +658,7 @@ struct VideoViewer: View {
             .accessibilityLabel(S.actionSkipForward)
             Spacer(minLength: 0)
             speedMenu
-            if item.isVideo {
+            if item.isVideo && !Platform.isMac {
                 Spacer(minLength: 0)
                 Button { ScreenOrientation.rotate(toLandscape: !landscape) } label: {
                     Image(systemName: landscape ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right")
@@ -618,8 +688,8 @@ struct VideoViewer: View {
             let fraction = CGFloat(min(max(controller.current / end, 0), 1))
             ZStack(alignment: .leading) {
                 Capsule().fill(Color.white.opacity(0.3)).frame(height: 4).padding(.horizontal, thumb / 2)
-                Capsule().fill(Brand.primary).frame(width: span * fraction, height: 4).padding(.leading, thumb / 2)
-                Circle().fill(Brand.primary).frame(width: thumb, height: thumb).offset(x: span * fraction)
+                Capsule().fill(Brand.playbackAccent).frame(width: span * fraction, height: 4).padding(.leading, thumb / 2)
+                Circle().fill(Brand.playbackAccent).frame(width: thumb, height: thumb).offset(x: span * fraction)
             }
             .frame(maxHeight: .infinity)
             .contentShape(Rectangle())

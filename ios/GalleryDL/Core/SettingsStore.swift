@@ -5,6 +5,7 @@ import Foundation
 final class SettingsStore: ObservableObject {
     @Published var options: GalleryDlOptions { didSet { save() } }
     @Published var startupSound: Bool { didSet { defaults.set(startupSound, forKey: Keys.sound) } }
+    @Published var darkAppearance: Bool { didSet { defaults.set(darkAppearance, forKey: Keys.darkAppearance) } }
     /// How many columns the files of a library folder are shown in: 2 to 4. Three by default.
     @Published var folderColumns: Int { didSet { defaults.set(folderColumns, forKey: Keys.columns) } }
     /// How many columns the folder list of the library uses: 2 or 3. Two by default.
@@ -23,6 +24,7 @@ final class SettingsStore: ObservableObject {
     private let defaults = UserDefaults.standard
 
     private enum Keys {
+        static let darkAppearance = "darkAppearance"
         static let options = "gdl.options", sound = "startupSound", previews = "livePreviews", previewSpeed = "previewSpeed", columns = "folderColumns", libraryColumns = "libraryColumns", libraryNewestFirst = "libraryNewestFirst", folderNewestFirst = "folderNewestFirst", cookies = "gdl.cookiesCount"
     }
 
@@ -35,12 +37,13 @@ final class SettingsStore: ObservableObject {
         }
         // `bool(forKey:)` and `integer(forKey:)` also read values given as launch arguments, which arrive as text.
         startupSound = defaults.object(forKey: Keys.sound) == nil ? true : defaults.bool(forKey: Keys.sound)
+        darkAppearance = defaults.object(forKey: Keys.darkAppearance) == nil ? true : defaults.bool(forKey: Keys.darkAppearance)
         livePreviews = defaults.object(forKey: Keys.previews) == nil ? true : defaults.bool(forKey: Keys.previews)
         previewSpeed = defaults.object(forKey: Keys.previewSpeed) == nil ? 1 : defaults.double(forKey: Keys.previewSpeed)
-        libraryColumns = defaults.object(forKey: Keys.libraryColumns) == nil ? 2 : min(max(defaults.integer(forKey: Keys.libraryColumns), 2), 3)
+        libraryColumns = defaults.object(forKey: Keys.libraryColumns) == nil ? Platform.libraryColumnsDefault : min(max(defaults.integer(forKey: Keys.libraryColumns), Platform.libraryColumns.lowerBound), Platform.libraryColumns.upperBound)
         libraryNewestFirst = defaults.object(forKey: Keys.libraryNewestFirst) == nil ? true : defaults.bool(forKey: Keys.libraryNewestFirst)
         folderNewestFirst = defaults.object(forKey: Keys.folderNewestFirst) == nil ? true : defaults.bool(forKey: Keys.folderNewestFirst)
-        folderColumns = defaults.object(forKey: Keys.columns) == nil ? 3 : min(max(defaults.integer(forKey: Keys.columns), 2), 4)
+        folderColumns = defaults.object(forKey: Keys.columns) == nil ? Platform.folderColumnsDefault : min(max(defaults.integer(forKey: Keys.columns), Platform.folderColumns.lowerBound), Platform.folderColumns.upperBound)
         cookiesCount = defaults.integer(forKey: Keys.cookies)
     }
 
@@ -65,6 +68,11 @@ final class SettingsStore: ObservableObject {
             return !entry.trimmingCharacters(in: .whitespaces).isEmpty && !entry.hasPrefix("#") && entry.split(separator: "\t", omittingEmptySubsequences: false).count >= 7
         }.count
         guard count > 0, (try? bytes.write(to: MediaFiles.cookiesFile, options: .atomic)) != nil else { return false }
+        // Sign-in cookies are the user's secrets: they stay out of device backups, like the other files the app can rebuild.
+        var values = URLResourceValues()
+        values.isExcludedFromBackup = true
+        var cookies = MediaFiles.cookiesFile
+        try? cookies.setResourceValues(values)
         cookiesCount = count
         defaults.set(count, forKey: Keys.cookies)
         options.cookiesEnabled = true
@@ -84,6 +92,7 @@ final class SettingsStore: ObservableObject {
         options = GalleryDlOptions()
         options.cookiesEnabled = keepCookies
         startupSound = true
+        darkAppearance = true
         livePreviews = true
         previewSpeed = 1
     }

@@ -246,9 +246,9 @@ class SyncManager(
             for (i in 0 until array.length()) {
                 val link = array.getJSONObject(i)
                 val url = link.optString("url")
-                // Only web links: what another device sends is still checked before it reaches Home.
-                val web = url.startsWith("http://", ignoreCase = true) || url.startsWith("https://", ignoreCase = true)
-                if (web && !downloads.hasLink(url)) {
+                // Only public web links: what another device sends must not make the app fetch this network's own
+                // devices (a router's page, a machine on the same Wi-Fi).
+                if (isPublicWebLink(url) && !downloads.hasLink(url)) {
                     downloads.enqueue(url, link.optString("site").ifBlank { null })
                     linksAdded++
                 }
@@ -256,7 +256,7 @@ class SyncManager(
         }
         byName[FAVORITES_FILE]?.let { f ->
             val array = JSONObject(File(dir, safe(f.id)).readText()).optJSONArray("items") ?: org.json.JSONArray()
-            val web = { u: String -> u.isEmpty() || u.startsWith("http://", ignoreCase = true) || u.startsWith("https://", ignoreCase = true) }
+            val web = { u: String -> u.isEmpty() || isPublicWebLink(u) }
             for (i in 0 until array.length()) {
                 val item = array.optJSONObject(i) ?: run { left += "item ${i + 1}: unreadable entry in the list"; null } ?: continue
                 val name = item.optString("name").ifBlank { "(no name)" }

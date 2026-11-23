@@ -58,7 +58,7 @@ struct RootView: View {
             }
         }
         .font(.inter(size: 16))
-        .preferredColorScheme(.dark)
+        .preferredColorScheme(settings.darkAppearance ? .dark : .light)
         .environmentObject(previews)
         .onAppear { previews.enabledBySetting = settings.livePreviews; PreviewHost.speed = settings.previewSpeed }
         .onChange(of: settings.previewSpeed) { PreviewHost.speed = $0 }

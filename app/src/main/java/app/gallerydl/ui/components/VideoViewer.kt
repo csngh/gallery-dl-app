@@ -43,6 +43,7 @@ import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.foundation.focusable
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -101,6 +102,9 @@ import androidx.compose.foundation.relocation.bringIntoViewResponder
 import androidx.compose.foundation.relocation.BringIntoViewResponder
 import androidx.compose.ui.input.key.nativeKeyCode
 import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
+import app.gallerydl.ui.theme.GalleryDlTheme
 import androidx.compose.ui.layout.positionInWindow
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalConfiguration
@@ -286,6 +290,7 @@ private val EDGE_SWIPE_DISTANCE = 56.dp
  * put while the picture is zoomed in. Formats the system cannot play fall back to the open button.
  */
 @OptIn(ExperimentalFoundationApi::class)
+@androidx.annotation.OptIn(UnstableApi::class)
 @Composable
 fun VideoViewer(
     uri: Uri,
@@ -297,6 +302,8 @@ fun VideoViewer(
     /** While locked, every touch is ignored and the controls are hidden, except the button that unlocks. */
     locked: Boolean = false,
     onLockedChange: (Boolean) -> Unit = {},
+    /** Incremented when Down is pressed in the viewer's top bar. */
+    controlsFocusRequest: Int = 0,
     /** Whether there is a file before or after this one to swipe to from the edges. */
     canGoPrevious: Boolean = false,
     canGoNext: Boolean = false,
@@ -422,29 +429,36 @@ fun VideoViewer(
         onZoom(false)
     }
 
-    // Double-tap zooms glide to their end instead of jumping there.
     // A remote's D-pad moves between the buttons, so the play button takes the focus when the player opens. The picture's
     // own layer holds it only while the bar is hidden; any D-pad key then brings the bar up and moves the focus to the button.
     val surfaceFocus = remember { FocusRequester() }
     val playFocus = remember { FocusRequester() }
     var wakeBar by remember { mutableIntStateOf(0) }
-    LaunchedEffect(Unit) {
-        // Only where there is a remote: on a touch phone nothing should be drawn as focused when the player opens.
+    LaunchedEffect(remoteOnly, controlsVisible, locked) {
         if (!remoteOnly) return@LaunchedEffect
-        delay(200)
-        runCatching { if (controlsVisible) playFocus.requestFocus() else surfaceFocus.requestFocus() }
+        runCatching { if (controlsVisible && !locked) playFocus.requestFocus() else surfaceFocus.requestFocus() }
     }
     // Locked, the bar is gone and a remote can only reach the unlock button through the picture's own layer.
     LaunchedEffect(locked) {
-        if (locked) {
+        if (locked && !remoteOnly) {
             delay(100)
             runCatching { surfaceFocus.requestFocus() }
         }
     }
     LaunchedEffect(wakeBar) {
-        if (wakeBar > 0) {
+        if (wakeBar > 0 && !remoteOnly) {
             delay(100)
             runCatching { playFocus.requestFocus() }
+        }
+    }
+    val initialControlsFocusRequest = remember { controlsFocusRequest }
+    LaunchedEffect(controlsFocusRequest) {
+        if (controlsFocusRequest == initialControlsFocusRequest || locked) return@LaunchedEffect
+        if (controlsVisible || controller.unplayable) {
+            playFocus.requestFocus()
+        } else {
+            controlsVisible = true
+            if (!remoteOnly) wakeBar++
         }
     }
 
@@ -545,7 +559,7 @@ fun VideoViewer(
             ),
     ) {
         if (controller.unplayable) {
-            IconButton(onClick = onOpen, modifier = Modifier.align(Alignment.Center).size(72.dp)) {
+            IconButton(onClick = onOpen, modifier = Modifier.align(Alignment.Center).size(72.dp).focusRing(CircleShape).focusRequester(playFocus)) {
                 Icon(
                     if (isAudio) Icons.Filled.MusicNote else Icons.Filled.PlayCircle,
                     contentDescription = stringResource(R.string.action_open),
@@ -597,11 +611,11 @@ fun VideoViewer(
                     }
                 }
                 .pointerInput(isAudio, locked, remoteOnly) {
-                    // Drags, edge swipes and pinches are for a touchscreen. On a TV or projector a pointer-style remote would
-                    // turn every small move near an edge into a sideways drag, and the picture and the bar would jitter.
-                    if (locked || remoteOnly) return@pointerInput
+                    if (locked) return@pointerInput
                     awaitEachGesture {
                         val down = awaitFirstDown(requireUnconsumed = false)
+                        // TV pointer drags move an already zoomed picture, but never scrub or flip to another file.
+                        if (remoteOnly && scale <= 1.02f) return@awaitEachGesture
                         zoomAnimation?.cancel()
                         // A drag that starts in the outer fifth of the screen changes video; in the middle it scrubs.
                         val atEdge = down.position.x < size.width * EDGE_FRACTION || down.position.x > size.width * (1 - EDGE_FRACTION)
@@ -632,9 +646,9 @@ fun VideoViewer(
                                 moved += delta
                                 if (!dragging && (abs(moved.x) > slop || abs(moved.y) > slop)) {
                                     dragging = true
-                                    if (atEdge && scale <= 1.02f && abs(moved.x) > abs(moved.y)) {
+                                    if (!remoteOnly && atEdge && scale <= 1.02f && abs(moved.x) > abs(moved.y)) {
                                         edgeSwiping = true
-                                    } else if (!isAudio && scale <= 1.02f && abs(moved.x) > abs(moved.y) && controller.duration > 0) {
+                                    } else if (!remoteOnly && !isAudio && scale <= 1.02f && abs(moved.x) > abs(moved.y) && controller.duration > 0) {
                                         // A drag across a picture that is not zoomed is a scrub, when it is mostly sideways.
                                         scrubbingNow = true
                                         beginScrub()
@@ -692,7 +706,7 @@ fun VideoViewer(
                     val handled = when (event.key) {
                         // The D-pad does nothing of its own here: it brings the bar up and moves to its buttons.
                         Key.DirectionLeft, Key.DirectionRight, Key.DirectionUp, Key.DirectionDown,
-                        Key.DirectionCenter, Key.Enter, Key.NumPadEnter -> { if (first) wakeBar++; true }
+                        Key.DirectionCenter, Key.Enter, Key.NumPadEnter -> { if (first && !remoteOnly) wakeBar++; true }
                         // The dedicated media keys of a remote still do what they say.
                         Key.MediaRewind -> { controller.skip(-3 * SKIP_SECONDS); true }
                         Key.MediaFastForward -> { controller.skip(3 * SKIP_SECONDS); true }
@@ -763,6 +777,7 @@ fun VideoViewer(
                 landscape = landscape,
                 bottomInset = bottomInset,
                 playFocus = playFocus,
+                remoteOnly = remoteOnly,
                 // Without a touchscreen there is no swipe from the edge, so the bar has buttons for the neighbouring files.
                 onPrevious = if (remoteOnly && canGoPrevious) ({ slideTo(-1, "button") }) else null,
                 onNext = if (remoteOnly && canGoNext) ({ slideTo(1, "button") }) else null,
@@ -814,10 +829,12 @@ private fun Controls(
     bottomInset: Dp,
     onLock: () -> Unit,
     playFocus: FocusRequester,
+    remoteOnly: Boolean,
     onPrevious: (() -> Unit)?,
     onNext: (() -> Unit)?,
     modifier: Modifier = Modifier,
-) {
+) = GalleryDlTheme(dark = true) { // The transport sits over a dark scrim in both appearances.
+    val seekFocus = remember { FocusRequester() }
     Column(
         modifier
             .fillMaxWidth()
@@ -830,7 +847,12 @@ private fun Controls(
         // rotate. The row is capped in width, so it looks the same in portrait and landscape.
         Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
             Row(
-                Modifier.widthIn(max = if (onPrevious != null || onNext != null) 560.dp else 440.dp).fillMaxWidth(),
+                Modifier.widthIn(max = if (onPrevious != null || onNext != null) 560.dp else 440.dp).fillMaxWidth()
+                    .then(if (remoteOnly) Modifier.onPreviewKeyEvent { event ->
+                        if (event.key != Key.DirectionDown || controller.duration <= 0f) return@onPreviewKeyEvent false
+                        if (event.type == KeyEventType.KeyDown) seekFocus.requestFocus()
+                        true
+                    } else Modifier),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.SpaceEvenly,
             ) {
@@ -888,7 +910,24 @@ private fun Controls(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(Spacing.Sm),
         ) {
-            SeekRow(controller, onScrubStart, onScrub, onScrubEnd)
+            val seekModifier = if (remoteOnly) {
+                Modifier
+                    .focusRequester(seekFocus)
+                    .focusProperties { up = playFocus }
+                    .focusRing(RoundedCornerShape(12.dp))
+                    .onPreviewKeyEvent { event ->
+                        val direction = when (event.key) {
+                            Key.DirectionLeft -> -1
+                            Key.DirectionRight -> 1
+                            else -> return@onPreviewKeyEvent false
+                        }
+                        if (event.type == KeyEventType.KeyDown && controller.duration > 0f) {
+                            controller.skip(direction * minOf(SKIP_SECONDS, controller.duration / 20f))
+                        }
+                        true
+                    }
+            } else Modifier
+            SeekRow(controller, onScrubStart, onScrub, onScrubEnd, seekModifier)
         }
     }
 }
@@ -900,10 +939,12 @@ private fun RowScope.SeekRow(
     onScrubStart: () -> Unit,
     onScrub: (Float) -> Unit,
     onScrubEnd: () -> Unit,
+    modifier: Modifier,
 ) {
     Text(formatTime(controller.current), color = Color.White, style = MaterialTheme.typography.labelMedium, modifier = Modifier.widthIn(min = 36.dp))
     var dragging by remember { mutableStateOf(false) }
     val end = maxOf(controller.duration, 0.1f)
+    val seekLabel = stringResource(R.string.action_seek)
     Slider(
         value = controller.current.coerceIn(0f, end),
         onValueChange = { value ->
@@ -918,7 +959,8 @@ private fun RowScope.SeekRow(
             onScrubEnd()
         },
         valueRange = 0f..end,
-        modifier = Modifier.weight(1f),
+        enabled = controller.duration > 0f,
+        modifier = Modifier.weight(1f).then(modifier).semantics { contentDescription = seekLabel },
         colors = SliderDefaults.colors(thumbColor = MaterialTheme.colorScheme.primary, activeTrackColor = MaterialTheme.colorScheme.primary),
     )
     Text(formatTime(controller.duration), color = Color.White, style = MaterialTheme.typography.labelMedium, modifier = Modifier.widthIn(min = 36.dp))
@@ -976,6 +1018,3 @@ private fun Context.findActivity(): Activity? {
     }
     return null
 }
-
-
-

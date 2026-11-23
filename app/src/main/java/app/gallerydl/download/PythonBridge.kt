@@ -1,9 +1,11 @@
 package app.gallerydl.download
 
 import android.content.Context
+import android.net.Uri
 import com.chaquo.python.Python
 import com.chaquo.python.android.AndroidPlatform
 import org.json.JSONObject
+import java.io.File
 
 /** Called from the Python side while gallery-dl runs. Methods are invoked on the worker's IO thread. */
 interface DownloadListener {
@@ -22,9 +24,54 @@ data class DownloadOutcome(val status: Int, val failed: Int, val errors: List<St
 /** Thin wrapper around the embedded gallery-dl (see `python/gdl_bridge.py`). */
 class PythonBridge(private val context: Context) {
 
-    private val module by lazy {
+    private val runtime by lazy {
         if (!Python.isStarted()) Python.start(AndroidPlatform(context))
-        Python.getInstance().getModule("gdl_bridge")
+        Python.getInstance().also { python ->
+            val config = JSONObject()
+                .put("directory", File(context.noBackupFilesDir, "extractor-plugins").path)
+                .put("target", "android")
+                .put("temporary", context.cacheDir.path)
+            python.getModule("gdl_plugins").callAttr("start", config.toString())
+        }
+    }
+    private val module by lazy { runtime.getModule("gdl_bridge") }
+
+    internal fun plugins(action: String, id: String? = null, enabled: Boolean? = null, uri: Uri? = null): PluginSnapshot {
+        val request = JSONObject().put("action", action).put("id", id).put("enabled", enabled)
+        val staged = uri?.let { File.createTempFile("plugin-import-", ".gdlplugin", context.cacheDir) }
+        try {
+            if (uri != null && staged != null) {
+                val stream = context.contentResolver.openInputStream(uri) ?: error("Could not open the plugin file.")
+                stream.use { input ->
+                    staged.outputStream().use { output ->
+                        val buffer = ByteArray(64 * 1024)
+                        var total = 0L
+                        while (true) {
+                            val count = input.read(buffer)
+                            if (count < 0) break
+                            total += count
+                            if (total > 256L * 1024 * 1024) error("The plugin file is larger than 256 MB.")
+                            output.write(buffer, 0, count)
+                        }
+                    }
+                }
+                request.put("path", staged.path)
+            }
+            val result = JSONObject(runtime.getModule("gdl_plugins").callAttr("command", request.toString()).toString())
+            if (!result.isNull("error")) error(result.getString("error"))
+            val list = result.getJSONArray("plugins")
+            return PluginSnapshot(List(list.length()) { index ->
+                val plugin = list.getJSONObject(index)
+                val domains = plugin.getJSONArray("domains")
+                ExtractorPlugin(
+                    id = plugin.getString("id"), name = plugin.getString("name"), version = plugin.getString("version"),
+                    domains = List(domains.length()) { domains.getString(it) }, enabled = plugin.getBoolean("enabled"),
+                    active = plugin.getBoolean("active"), error = if (plugin.isNull("error")) null else plugin.getString("error"),
+                )
+            }, result.getBoolean("restart_required"))
+        } finally {
+            staged?.delete()
+        }
     }
 
     fun isSupported(url: String): Boolean = module.callAttr("is_supported", url).toBoolean()

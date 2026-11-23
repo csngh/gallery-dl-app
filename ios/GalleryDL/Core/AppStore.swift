@@ -310,6 +310,10 @@ final class AppStore: ObservableObject {
     func adoptFile(sourceUrl: String, name: String, fileUrl: String, taskId: Int64, folder: String = "") -> Bool {
         var changed = false, handedOver = false
         for index in data.items.indices where isSameFile(data.items[index], sourceUrl: sourceUrl, name: name, fileUrl: fileUrl) {
+            let item = data.items[index]
+            // Older copies have no marker; their dedicated on-disk folder identifies them.
+            if item.isEnhancedCopy == true || (item.isEnhancedCopy == nil &&
+                (item.relativePath as NSString).deletingLastPathComponent == Self.enhancedFolder) { continue }
             if data.items[index].fileUrl != fileUrl { data.items[index].fileUrl = fileUrl; changed = true }
             if data.items[index].taskId != taskId { data.items[index].taskId = taskId; changed = true; handedOver = true }
             if !folder.isEmpty, moveToFolder(index, folder) { changed = true }
@@ -352,6 +356,77 @@ final class AppStore: ObservableObject {
         data.items.append(item)
         commit()
         return item
+    }
+
+    /// The library folder that saved copies of enhanced videos go to.
+    static let enhancedFolder = "Enhanced videos"
+
+    /// Saves an enhanced version of `old`: as a copy in the "Enhanced videos" folder (a new folder, so the original's own folder
+    /// is left as it was), or in the original's place in its own folder. Either way the new file carries everything the
+    /// original had: its link and address, the date it was added, the file's dates and extended attributes (Finder tags,
+    /// where-from and so on); the metadata inside the video is put in by the enhancer. The original is removed only after the
+    /// new file is saved and recorded, so a failure leaves the original as it was.
+    func addEnhanced(_ file: URL, of old: LibraryItem, replacing: Bool) -> Bool {
+        let manager = FileManager.default
+        let originalFolder = (old.relativePath as NSString).deletingLastPathComponent
+        guard !originalFolder.isEmpty else { return false }
+        let folder = replacing ? originalFolder : Self.enhancedFolder
+        let wanted = "\((old.displayName as NSString).deletingPathExtension).mp4"
+        let staging = manager.temporaryDirectory.appendingPathComponent("enhanced-\(UUID().uuidString)", isDirectory: true)
+        defer { try? manager.removeItem(at: staging) }
+        let staged = staging.appendingPathComponent(wanted.replacingOccurrences(of: "/", with: "_"))
+        guard (try? manager.createDirectory(at: staging, withIntermediateDirectories: true)) != nil,
+              (try? manager.copyItem(at: file, to: staged)) != nil else { return false }
+        Self.copyFileMetadata(from: old.fileURL, to: staged)
+        guard let saved = try? MediaFiles.importFile(staged, folder: folder) else { return false }
+        let folderId = replacing ? (old.folderId ?? ensureFolder(folder)) : ensureFolder(folder)
+        let new = addItem(
+            relativePath: saved.relative, displayName: saved.name, mimeType: "video/mp4", sourceUrl: old.sourceUrl,
+            taskId: old.taskId ?? 0, folderId: folderId, fileUrl: old.fileUrl,
+        )
+        // It was added when the original was added, so it keeps its place in the library's order.
+        if let index = data.items.firstIndex(where: { $0.id == new.id }) {
+            data.items[index].addedAt = old.addedAt
+            data.items[index].isEnhancedCopy = !replacing
+            commit()
+        }
+        guard replacing else { return true }
+        deleteItems([old.id])
+        // The new file took "name (1).mp4" if the original had the same name; now that is free, it gets the plain name.
+        if saved.name != wanted, !manager.fileExists(atPath: MediaFiles.root.appendingPathComponent(folder).appendingPathComponent(wanted).path),
+           (try? manager.moveItem(at: new.fileURL, to: MediaFiles.root.appendingPathComponent(folder).appendingPathComponent(wanted))) != nil,
+           let index = data.items.firstIndex(where: { $0.id == new.id }) {
+            data.items[index].relativePath = "\(folder)/\(wanted)"
+            data.items[index].displayName = wanted
+            commit()
+        }
+        return true
+    }
+
+    /// Gives `target` the creation and modification dates of `source`, and every extended attribute it has.
+    private static func copyFileMetadata(from source: URL, to target: URL) {
+        let manager = FileManager.default
+        let from = source.path, to = target.path
+        let size = listxattr(from, nil, 0, 0)
+        if size > 0 {
+            var names = [CChar](repeating: 0, count: size)
+            if listxattr(from, &names, size, 0) > 0 {
+                for part in names.split(separator: 0) {
+                    let name = String(cString: Array(part) + [0])
+                    if name == "com.apple.quarantine" { continue }
+                    let length = getxattr(from, name, nil, 0, 0, 0)
+                    guard length >= 0 else { continue }
+                    var value = [UInt8](repeating: 0, count: length)
+                    if getxattr(from, name, &value, length, 0, 0) >= 0 { _ = setxattr(to, name, value, length, 0, 0) }
+                }
+            }
+        }
+        // The dates go last: nothing above may change them again.
+        guard let attributes = try? manager.attributesOfItem(atPath: from) else { return }
+        var dates: [FileAttributeKey: Any] = [:]
+        if let created = attributes[.creationDate] { dates[.creationDate] = created }
+        if let modified = attributes[.modificationDate] { dates[.modificationDate] = modified }
+        try? manager.setAttributes(dates, ofItemAtPath: to)
     }
 
     /// Gives a folder a tag, or takes it off when `tag` is blank. Long tags are cut to 40 characters.

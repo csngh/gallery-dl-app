@@ -13,7 +13,8 @@ struct QueueScreen: View {
     var body: some View {
         VStack(spacing: 0) {
             TopBar(title: S.navQueue, leading: {
-                IconButton(symbol: "chevron.left", color: Brand.onSurface, label: S.actionBack, action: onBack)
+                // The Mac sidebar is the way back.
+                if !Platform.isMac { IconButton(symbol: "chevron.left", color: Brand.onSurface, label: S.actionBack, action: onBack) }
             }, trailing: {
                 if tasks.contains(where: \.isFinished) {
                     TextPill(title: S.actionClearFinished, color: ActionColors.negative) { ui.confirmClearFinished(store: store) }

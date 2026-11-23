@@ -147,7 +147,7 @@ class DownloadRepository(
      * paused and carries on from the files the library already has, so no file is fetched twice.
      */
     suspend fun applyNetworkSetting() {
-        if (dao.nextQueued() != null) scheduleDrain(ExistingWorkPolicy.REPLACE)
+        if (dao.activeIds().isNotEmpty()) scheduleDrain(ExistingWorkPolicy.REPLACE)
     }
 
     /** Starts the queue again after it was paused for lack of storage. */

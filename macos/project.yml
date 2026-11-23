@@ -1,0 +1,76 @@
+name: GalleryDLMac
+options:
+  bundleIdPrefix: app.gallerydl
+  deploymentTarget:
+    macOS: "14.0"
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    ENABLE_USER_SCRIPT_SANDBOXING: NO
+    # libvpx is built for Apple silicon only (scripts/build_webm.sh).
+    ARCHS: arm64
+    ONLY_ACTIVE_ARCH: YES
+targets:
+  GalleryDLMac:
+    type: application
+    platform: macOS
+    sources:
+      # The engine, the data, the sync and the screens are the iPhone app's own files; only the window around them
+      # (GalleryDLMac/) and the platform shim (Core/Platform.swift) are different.
+      - path: ../ios/GalleryDL
+        excludes:
+          - Info.plist
+          - Assets.xcassets
+          - GalleryDLApp.swift
+          - UI/RootView.swift
+      - path: GalleryDLMac
+        excludes:
+          - Info.plist
+      # Brand assets are shared with the Android app instead of copied.
+      - path: ../app/src/main/res/raw/splash_download.wav
+      - path: ../app/src/main/res/font/inter_variable.ttf
+    info:
+      path: GalleryDLMac/Info.plist
+      properties:
+        CFBundleDisplayName: Gallery DL
+        LSMinimumSystemVersion: "14.0"
+        LSApplicationCategoryType: public.app-category.utilities
+        NSHumanReadableCopyright: gallery-dl is by Mike Fährmann (GPL-2.0).
+        # Sync with another Gallery DL on the same network: devices are found by asking the addresses of the local network.
+        NSLocalNetworkUsageDescription: Gallery DL looks for your other devices on this network so it can share your links and favorite videos with them.
+        UTImportedTypeDeclarations:
+          - UTTypeIdentifier: app.gallerydl.extractor-plugin
+            UTTypeDescription: Gallery DL Extractor Plugin
+            UTTypeConformsTo:
+              - public.zip-archive
+            UTTypeTagSpecification:
+              public.filename-extension:
+                - gdlplugin
+    settings:
+      base:
+        PRODUCT_NAME: Gallery DL
+        PRODUCT_BUNDLE_IDENTIFIER: app.gallerydl.mac
+        SWIFT_OBJC_BRIDGING_HEADER: ../ios/GalleryDL/GalleryDL-Bridging-Header.h
+        MARKETING_VERSION: "1.0"
+        CURRENT_PROJECT_VERSION: "1"
+        CODE_SIGN_STYLE: Automatic
+        # Without a team the app is signed to run on this Mac; set DEVELOPMENT_TEAM to sign it for others.
+        CODE_SIGN_IDENTITY: "-"
+        DEVELOPMENT_TEAM: ""
+        ENABLE_HARDENED_RUNTIME: NO
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        # libvorbis and libogg (BSD licence) are compiled in from Core/WebM/Vorbis; their headers are included as <ogg/ogg.h>.
+        HEADER_SEARCH_PATHS: "$(SRCROOT)/../ios/GalleryDL/Core/WebM/Vorbis $(SRCROOT)/../ios/GalleryDL"
+    dependencies:
+      - framework: Python.xcframework
+        embed: true
+        codeSign: true
+      # Built by scripts/build_webm.sh: the VP8/VP9 decoder the app uses for .webm files.
+      - framework: Vendor/Vpx.xcframework
+        embed: false
+      - sdk: libz.tbd
+      - sdk: libsqlite3.tbd
+    postBuildScripts:
+      - name: Install app code and Python packages
+        script: bash "$PROJECT_DIR/scripts/embed_python.sh"
+        basedOnDependencyAnalysis: false

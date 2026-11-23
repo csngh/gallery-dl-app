@@ -17,11 +17,20 @@ struct SettingsScreen: View {
         let options = settings.options
         VStack(spacing: 0) {
             TopBar(title: S.settingsTitle, leading: {
-                IconButton(symbol: "chevron.left", color: Brand.onSurface, label: S.actionBack, action: onBack)
+                // The Mac sidebar is the way back.
+                if !Platform.isMac { IconButton(symbol: "chevron.left", color: Brand.onSurface, label: S.actionBack, action: onBack) }
             }, trailing: {})
             SoftScrollView {
                 VStack(alignment: .leading, spacing: Spacing.lg) {
                     SettingsSection(title: S.settingsAppearanceTitle, message: S.settingsAppearanceBody) {
+                        Text(S.optionThemeTitle).textStyle(.titleSmall)
+                        Picker(S.optionThemeTitle, selection: $settings.darkAppearance) {
+                            Text(S.optionThemeDark).tag(true)
+                            Text(S.optionThemeLight).tag(false)
+                        }
+                        .pickerStyle(.segmented)
+                        .labelsHidden()
+                        Divider
                         SwitchRow(title: S.optionStartupSoundTitle, message: S.optionStartupSoundBody, isOn: $settings.startupSound)
                         Divider
                         SwitchRow(title: S.optionLivePreviewsTitle, message: S.optionLivePreviewsBody, isOn: $settings.livePreviews)
@@ -39,6 +48,12 @@ struct SettingsScreen: View {
                     SettingsSection(title: S.settingsLocationTitle, message: S.settingsLocationBody) {
                         Text(S.downloadLocation).textStyle(.bodyLarge)
                         Text(S.downloadLocationHint).textStyle(.bodySmall, color: Brand.onSurfaceVariant)
+                        if Platform.isMac {
+                            OutlinedPill(title: S.actionShowInFinder, symbol: "folder") {
+                                try? FileManager.default.createDirectory(at: MediaFiles.root, withIntermediateDirectories: true)
+                                ShareSheet.reveal(MediaFiles.root)
+                            }
+                        }
                     }
 
                     SettingsSection(title: S.settingsConnectionTitle, message: S.settingsConnectionBody) {
@@ -78,6 +93,10 @@ struct SettingsScreen: View {
 
                     SettingsSection(title: S.settingsSitesTitle, message: S.settingsSitesBody) {
                         SwitchRow(title: S.optionApiRestTitle, message: S.optionApiRestBody, isOn: $settings.options.apiRest)
+                    }
+
+                    SettingsSection(title: "Extractor plugins", message: "Add support for extra sites from a local .gdlplugin file.") {
+                        ExtractorPluginsSettings()
                     }
 
                     SettingsSection(title: S.settingsAccountsTitle, message: S.settingsAccountsBody) {
@@ -209,9 +228,9 @@ private struct PreviewSpeedRow: View {
                 ForEach(options, id: \.self) { value in
                     Button { speed = value } label: {
                         Text((value == value.rounded() ? String(Int(value)) : String(format: "%g", value)) + "×")
-                            .textStyle(.labelLarge, color: value == speed ? .white : Brand.onSurfaceVariant)
+                            .textStyle(.labelLarge, color: value == speed ? Brand.onPrimary : Brand.onSurfaceVariant)
                             .frame(maxWidth: .infinity, minHeight: 40)
-                            .background(Capsule().fill(value == speed ? Brand.primary : Color.white.opacity(0.08)))
+                            .background(Capsule().fill(value == speed ? Brand.primary : Brand.onSurface.opacity(0.08)))
                             .contentShape(Capsule())
                     }
                     .buttonStyle(.plain)

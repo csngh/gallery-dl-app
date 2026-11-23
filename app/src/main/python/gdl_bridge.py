@@ -12,7 +12,6 @@ from urllib.parse import unquote, urlsplit
 from gallery_dl import config, exception, extractor, job, output
 from gallery_dl.extractor import common
 
-
 def is_supported(url):
     """True if gallery-dl has an extractor that matches the URL."""
     try:
@@ -102,8 +101,6 @@ def _normal(name):
     """A file name in one fixed spelling, so the same accented or CJK name compares equal whichever way it was stored."""
     return unicodedata.normalize("NFC", name)
 
-# The listener of the download that is running, so a cancel reaches code that is not inside a file transfer.
-_active = {"listener": None}
 _original_request = common.Extractor.request
 
 
@@ -113,7 +110,9 @@ def _cancellable_request(self, *args, **kwargs):
     A link that expands into hundreds of pages or sub-links would otherwise keep requesting them, one after another, long
     after the user pressed stop: only the file transfers themselves looked at the cancel flag.
     """
-    listener = _active["listener"]
+    # The listener of the job this extractor belongs to (see _ReportingJob): a cancel stops that job's requests only, not
+    # those of a preview or a check that happens to run at the same time, nor of the next download.
+    listener = getattr(self, "_gdl_listener", None)
     if listener is not None and listener.isCancelled():
         raise exception.StopExtraction()
     return _original_request(self, *args, **kwargs)
@@ -153,6 +152,8 @@ class _ReportingJob(job.DownloadJob):
     def __init__(self, url, parent=None, listener=None, known=None, known_urls=None):
         super().__init__(url, parent)
         self._listener = listener if listener is not None else parent._listener
+        if self.extractor is not None:
+            self.extractor._gdl_listener = self._listener
         # Names and direct addresses of files the library already has for this link. Removing a link and adding it again
         # leaves no archive, so without this every file would be fetched and saved a second time. The name decides: some
         # websites give a different address for the same file on every run (a fresh signature in it), the name does not.
@@ -365,12 +366,21 @@ class _FolderProbe(_ReportingJob):
 RESOLVE_IDLE_SECONDS = 180
 RESOLVE_MAX_SECONDS = 1800
 
-# Set by cancel_resolve(), so an import the user stops does not wait for a long walk through a link to end.
-_resolve_cancel = threading.Event()
+# Bumped by cancel_resolve(), so an import the user stops does not wait for a long walk through a link to end. A walk
+# remembers the number it started with: a cancel aimed at it stops it, and one aimed at an earlier walk cannot stop a
+# later one, which would otherwise end the next import without being asked.
+_resolve_cancel = {"generation": 0}
+_resolve_lock = threading.Lock()
 
 
 def cancel_resolve():
-    _resolve_cancel.set()
+    with _resolve_lock:
+        _resolve_cancel["generation"] += 1
+
+
+def _resolve_cancelled(generation):
+    with _resolve_lock:
+        return _resolve_cancel["generation"] != generation
 
 
 class _ResolveProbe(_ReportingJob):
@@ -379,7 +389,7 @@ class _ResolveProbe(_ReportingJob):
     def _finished(self):
         stats = self._stats
         now = time.monotonic()
-        return _resolve_cancel.is_set() or now > stats["deadline"] or now > stats["hard"] or len(stats["found"]) >= len(stats["wanted"])
+        return _resolve_cancelled(stats["generation"]) or now > stats["deadline"] or now > stats["hard"] or len(stats["found"]) >= len(stats["wanted"])
 
     def _alive(self):
         # Every file the link lists is progress, so a long link (one request per file, with the user's waits between them)
@@ -418,11 +428,14 @@ def resolve_files(url, names_json, options_json="{}", idle_seconds=None):
     A saved address can be dead: some sites sign them, and the signature runs out. The link itself always knows
     the current one. Safe to call while a download runs, like preview_folder().
     """
-    _resolve_cancel.clear()
+    # The walk stops when this number changes: a cancel aimed at it counts, one aimed at an earlier walk does not.
+    with _resolve_lock:
+        walk = _resolve_cancel["generation"]
     try:
         config.set(("extractor",), "path-restrict", "windows")
         _apply_options(options_json)
         probe = _ResolveProbe(url, listener=_NoListener())
+        probe._stats["generation"] = walk
         probe._stats["wanted"] = frozenset(_normal(n) for n in json.loads(names_json))
         probe._stats["found"] = {}
         # Some sites cost a request per file, and the user's waits between requests
@@ -463,7 +476,13 @@ def download(url, base_dir, archive_path, options_json, listener, known_json="[]
     options_json holds the user's switched-on options, for example {"sleep": [1.0, 3.0]}.
     Returns a JSON string: {"status": int, "failed": int, "errors": [str]}.
     """
-    config.clear()
+    # Options the user has switched off since the last run are removed. The ones still on stay as they are: a preview or a
+    # favorites check may be reading them right now, and wiping the whole configuration under it would break that run.
+    switched_on = json.loads(options_json or "{}")
+    for key in USER_OPTIONS - set(switched_on):
+        config.unset(("extractor",), key)
+        if key in BOTH_SECTIONS:
+            config.unset(("downloader",), key)
     config.set(("extractor",), "base-directory", base_dir)
     # gallery-dl's own folders are kept: the app names each library folder after the innermost one a file lands in.
     if archive_path:
@@ -481,7 +500,6 @@ def download(url, base_dir, archive_path, options_json, listener, known_json="[]
     collector = _ErrorCollector()
     root = logging.getLogger()
     root.addHandler(collector)
-    _active["listener"] = listener
     known = json.loads(known_json or "[]")
     # A plain list is just names; the apps send {"names": [...], "urls": [...]}.
     names, urls = (known.get("names", []), known.get("urls", [])) if isinstance(known, dict) else (known, [])
@@ -491,7 +509,6 @@ def download(url, base_dir, archive_path, options_json, listener, known_json="[]
         )
         status = download_job.run()
     finally:
-        _active["listener"] = None
         root.removeHandler(collector)
 
     errors = collector.messages
@@ -511,4 +528,3 @@ def download(url, base_dir, archive_path, options_json, listener, known_json="[]
         "failed": download_job.failed,
         "errors": errors,
     })
-

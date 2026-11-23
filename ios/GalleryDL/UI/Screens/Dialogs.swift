@@ -113,7 +113,11 @@ struct EditLinkDialog: View {
         busy = true
         error = nil
         Task {
-            await app.waitUntilReady()
+            guard await app.waitUntilReady() else {
+                busy = false
+                error = .engineUnavailable
+                return
+            }
             let result = await app.validator.check(url)
             if result.check == .valid {
                 app.engine.editLink(task.id, url: url, site: result.site)

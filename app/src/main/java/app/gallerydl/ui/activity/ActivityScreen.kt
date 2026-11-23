@@ -162,11 +162,12 @@ fun ActivityScreen(onBack: () -> Unit, viewModel: ActivityViewModel = viewModel(
 
 @Composable
 private fun StatCard(value: Int, label: Int, icon: ImageVector, tone: Tone, modifier: Modifier = Modifier) {
+    val accent = tone.icon
     Card(modifier) {
         Column(
             Modifier
                 // A 3 px edge in the tone along the top; the card clips it to its rounded corners.
-                .drawBehind { drawRect(tone.icon, size = Size(size.width, 3.dp.toPx())) }
+                .drawBehind { drawRect(accent, size = Size(size.width, 3.dp.toPx())) }
                 .padding(Spacing.Md),
         ) {
             Row(

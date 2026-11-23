@@ -4,13 +4,17 @@ The app runs download() on one thread and polls poll() from another, so progress
 Python-to-Swift callback. The listener below is what gdl_bridge.py expects from the host app.
 """
 import json
+import logging
 import threading
-import traceback
 
 import gdl_bridge
+from gdl_plugins import command as plugins, start as start_plugins
 
 _lock = threading.Lock()
-_cancel = threading.Event()
+# Runs a cancel was asked for, and the run that is going now. A cancel names its run, so one that arrives a moment before
+# its download starts still stops it, and one that arrives after it ended cannot stop the next.
+_cancelled = set()
+_current = {"run": None}
 _progress = {"handled": 0, "total": 0, "percent": -1, "name": ""}
 _files = []
 
@@ -29,7 +33,8 @@ class _Listener:
             _files.append({"skipped": name, "url": url, "folder": folder})
 
     def isCancelled(self):
-        return _cancel.is_set()
+        with _lock:
+            return _current["run"] in _cancelled
 
 
 def info(_arg):
@@ -67,8 +72,10 @@ def cancel_resolve(_arg):
 
 def download(arg):
     args = json.loads(arg)
-    _cancel.clear()
+    run = args.get("run")
     with _lock:
+        _current["run"] = run
+        _cancelled.intersection_update({run})
         _progress.update(handled=0, total=0, percent=-1, name="")
         _files.clear()
     try:
@@ -76,8 +83,11 @@ def download(arg):
             args["url"], args["base_dir"], args["archive_path"], json.dumps(args.get("options", {})), _Listener(),
             json.dumps(args.get("known", [])),
         )
-    except Exception:
-        return json.dumps({"status": -1, "failed": 0, "errors": [traceback.format_exc()]})
+    except Exception as exc:
+        # The person gets the reason, not the stack: the stack names paths into the app's own folders, which help
+        # nobody reading the error on screen. It still goes to the log, where a bug report can be read.
+        logging.getLogger(__name__).exception("The download failed")
+        return json.dumps({"status": -1, "failed": 0, "errors": [str(exc) or type(exc).__name__]})
 
 
 def poll(_arg):
@@ -89,6 +99,8 @@ def poll(_arg):
     return json.dumps(out)
 
 
-def cancel(_arg):
-    _cancel.set()
+def cancel(arg):
+    run = json.loads(arg or "{}").get("run")
+    with _lock:
+        _cancelled.add(_current["run"] if run is None else run)
     return "{}"

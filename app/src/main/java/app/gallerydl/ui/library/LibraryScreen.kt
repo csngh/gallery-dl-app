@@ -3,6 +3,7 @@ package app.gallerydl.ui.library
 import android.content.ActivityNotFoundException
 import android.content.Context
 import android.content.Intent
+import android.content.res.Configuration
 import android.net.Uri
 import android.widget.Toast
 import androidx.activity.compose.BackHandler
@@ -57,6 +58,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.staticCompositionLocalOf
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.first
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import app.gallerydl.download.isFavoritesFolder
@@ -83,11 +85,14 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -96,12 +101,14 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.input.key.onKeyEvent
+import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.Key
@@ -161,6 +168,8 @@ import androidx.compose.ui.unit.Dp
 import app.gallerydl.ui.components.TwoPaneMinWidth
 import app.gallerydl.ui.components.readableWidth
 
+private data class ViewerReturnTarget(val itemId: Long?, val index: Int)
+
 @Composable
 fun LibraryScreen(viewModel: LibraryViewModel = viewModel(factory = AppViewModelProvider.Factory)) {
     val openFolder by viewModel.openFolder.collectAsStateWithLifecycle()
@@ -186,8 +195,6 @@ fun LibraryScreen(viewModel: LibraryViewModel = viewModel(factory = AppViewModel
     }
     // Previews stop as soon as the app is no longer in front, and start again when it returns.
     LifecycleEventEffect(Lifecycle.Event.ON_PAUSE) { previewHost.appVisible = false }
-    BackHandler(enabled = openFolder != null, onBack = viewModel::back)
-
     val folder = openFolder
     // The folder list's scroll position lives here, above the choice between the list and an open folder, so coming back
     // from a folder lands where you left off instead of at the top.
@@ -196,6 +203,17 @@ fun LibraryScreen(viewModel: LibraryViewModel = viewModel(factory = AppViewModel
     // landscape switches that layout and rebuilds the folder screen; the viewer, and the video playing in it, must not.
     val viewerItems by viewModel.items.collectAsStateWithLifecycle()
     var viewerIndex by rememberSaveable { mutableStateOf<Int?>(null) }
+    var focusOnReturn by remember(folder?.id) { mutableStateOf<ViewerReturnTarget?>(null) }
+    val configuration = LocalConfiguration.current
+    val remoteOnly = configuration.touchscreen == Configuration.TOUCHSCREEN_NOTOUCH ||
+        (configuration.uiMode and Configuration.UI_MODE_TYPE_MASK) == Configuration.UI_MODE_TYPE_TELEVISION
+    val viewerOpen = ViewerState.open
+    val restoreTarget = focusOnReturn.takeUnless { viewerOpen }
+    val openViewer: (Int) -> Unit = { index ->
+        focusOnReturn = null
+        viewerIndex = index
+    }
+    BackHandler(enabled = folder != null && !viewerOpen, onBack = viewModel::back)
     // In the wide layout the folder list can be hidden so the open folder fills the whole screen.
     var foldersHidden by rememberSaveable { mutableStateOf(false) }
     LaunchedEffect(folder?.id) { viewerIndex = null }
@@ -248,7 +266,8 @@ fun LibraryScreen(viewModel: LibraryViewModel = viewModel(factory = AppViewModel
                     }
                 } else {
                     FolderContent(
-                        viewModel, folder, Modifier.weight(if (listHidden) 1f else 0.8f).fillMaxHeight(), showBack = false, onOpenViewer = { viewerIndex = it },
+                        viewModel, folder, Modifier.weight(if (listHidden) 1f else 0.8f).fillMaxHeight(), showBack = false, onOpenViewer = openViewer,
+                        restoreTarget = restoreTarget, onFocusRestored = { focusOnReturn = null },
                         foldersHidden = listHidden, onToggleFolders = { foldersHidden = !foldersHidden },
                     )
                 }
@@ -257,7 +276,10 @@ fun LibraryScreen(viewModel: LibraryViewModel = viewModel(factory = AppViewModel
         } else if (folder == null) {
             FoldersContent(viewModel, Modifier.readableWidth(), gridState = foldersGridState)
         } else {
-            FolderContent(viewModel, folder, Modifier.readableWidth(), showBack = true, onOpenViewer = { viewerIndex = it })
+            FolderContent(
+                viewModel, folder, Modifier.readableWidth(), showBack = true, onOpenViewer = openViewer,
+                restoreTarget = restoreTarget, onFocusRestored = { focusOnReturn = null },
+            )
         }
     }
     val openIndex = viewerIndex
@@ -268,7 +290,10 @@ fun LibraryScreen(viewModel: LibraryViewModel = viewModel(factory = AppViewModel
             Viewer(
                 items = viewable,
                 startIndex = openIndex,
-                onDismiss = { viewerIndex = null },
+                onDismiss = { target ->
+                    if (remoteOnly) focusOnReturn = target
+                    viewerIndex = null
+                },
                 onDelete = viewModel::deleteItem,
                 onFavorite = viewModel::addToFavorites,
             )
@@ -508,6 +533,8 @@ private fun FolderContent(
     modifier: Modifier,
     showBack: Boolean,
     onOpenViewer: (Int) -> Unit,
+    restoreTarget: ViewerReturnTarget?,
+    onFocusRestored: () -> Unit,
     foldersHidden: Boolean = false,
     onToggleFolders: (() -> Unit)? = null,
 ) {
@@ -517,6 +544,24 @@ private fun FolderContent(
     var confirmDelete by remember { mutableStateOf(false) }
     var detailsOf by remember { mutableStateOf<LibraryItem?>(null) }
     val itemsGridState = rememberLazyGridState()
+    val tileFocus = remember { FocusRequester() }
+    val restoreIndex = restoreTarget?.let { target ->
+        items?.takeIf { it.isNotEmpty() }?.let { files ->
+            files.indexOfFirst { it.id == target.itemId }.takeIf { it >= 0 }
+                ?: target.index.coerceIn(0, files.lastIndex)
+        }
+    }
+    val restoreId = restoreIndex?.let { items?.getOrNull(it)?.id }
+    LaunchedEffect(restoreTarget, restoreIndex, restoreId) {
+        if (restoreIndex == null || restoreId == null) return@LaunchedEffect
+        // The viewer can advance farther than the grid's viewport. Keep the old scroll position if the tile is still visible.
+        fun tileVisible() = itemsGridState.layoutInfo.visibleItemsInfo.any { it.key == restoreId }
+        if (!tileVisible()) itemsGridState.scrollToItem(restoreIndex)
+        snapshotFlow { tileVisible() }.first { it }
+        withFrameNanos { }
+        tileFocus.requestFocus()
+        onFocusRestored()
+    }
     val selecting = selection.isNotEmpty()
     val columns by viewModel.folderColumns.collectAsStateWithLifecycle()
     val tag by viewModel.openFolderTag.collectAsStateWithLifecycle()
@@ -662,6 +707,7 @@ private fun FolderContent(
                     Thumbnail(
                         item = item,
                         selected = item.id in selection,
+                        modifier = if (item.id == restoreId) Modifier.focusRequester(tileFocus) else Modifier,
                         onClick = {
                             if (selecting) viewModel.toggleSelected(item.id) else onOpenViewer(current.indexOf(item))
                         },
@@ -842,9 +888,9 @@ private fun ColumnsMenu(columns: Int, onSelect: (Int) -> Unit, options: IntRange
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun Thumbnail(item: LibraryItem, selected: Boolean, onClick: () -> Unit, onLongClick: () -> Unit) {
+private fun Thumbnail(item: LibraryItem, selected: Boolean, onClick: () -> Unit, onLongClick: () -> Unit, modifier: Modifier = Modifier) {
     Surface(
-        modifier = Modifier
+        modifier = modifier
             .aspectRatio(1f)
             .clip(MaterialTheme.shapes.small)
             .onRemoteLongPress(onLongClick)
@@ -891,14 +937,22 @@ private fun Thumbnail(item: LibraryItem, selected: Boolean, onClick: () -> Unit,
 
 @OptIn(androidx.compose.ui.ExperimentalComposeUiApi::class)
 @Composable
-private fun Viewer(items: List<LibraryItem>, startIndex: Int, onDismiss: () -> Unit, onDelete: (Long) -> Unit, onFavorite: (LibraryItem, (Int) -> Unit) -> Unit) {
+private fun Viewer(items: List<LibraryItem>, startIndex: Int, onDismiss: (ViewerReturnTarget?) -> Unit, onDelete: (Long) -> Unit, onFavorite: (LibraryItem, (Int) -> Unit) -> Unit) {
     if (items.isEmpty()) {
-        LaunchedEffect(Unit) { onDismiss() }
+        LaunchedEffect(Unit) { onDismiss(null) }
         return
     }
     val context = LocalContext.current
     val pagerState = rememberPagerState(initialPage = startIndex.coerceIn(0, items.lastIndex)) { items.size }
-    val current = items.getOrNull(pagerState.currentPage)
+    // The file on screen is known by its key, which the pager keeps right when files are added or removed (a download saves
+    // one now and then), and not by an index: that lags behind the list for a moment, and a page that looked inactive then
+    // lost its player, so the video started over from 0:00.
+    val keyOnScreen by remember(pagerState) {
+        derivedStateOf { pagerState.layoutInfo.visiblePagesInfo.firstOrNull { it.index == pagerState.currentPage }?.key }
+    }
+    val idOnScreen = keyOnScreen ?: items.getOrNull(pagerState.currentPage)?.id
+    val current = items.firstOrNull { it.id == idOnScreen }
+    val dismiss = { onDismiss(ViewerReturnTarget(current?.id, pagerState.currentPage)) }
     val scope = rememberCoroutineScope()
     // "Save to Files" for the file on screen: the person names where it goes.
     val saveFilePicker = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("*/*")) { target ->
@@ -922,6 +976,7 @@ private fun Viewer(items: List<LibraryItem>, startIndex: Int, onDismiss: () -> U
     var zoomed by remember { mutableStateOf(false) }
     // The touch lock of the video player: while on, the back button and the top bar are off as well.
     var locked by remember { mutableStateOf(false) }
+    var controlsFocusRequest by remember { mutableIntStateOf(0) }
     val onPlayablePage = current?.mimeType?.let { it.startsWith("video/") || it.startsWith("audio/") } == true
     // Closing the viewer gives the screen back to the system's own rotation (a video may have turned it to landscape).
     androidx.compose.runtime.DisposableEffect(Unit) {
@@ -933,7 +988,7 @@ private fun Viewer(items: List<LibraryItem>, startIndex: Int, onDismiss: () -> U
     // devices and left the library showing above and below the picture.
     // Always handled here, even while locked: if it were only switched off, the back press would fall through to the
     // library screen behind and close the folder (and with it the viewer).
-    androidx.activity.compose.BackHandler { if (!locked) onDismiss() }
+    androidx.activity.compose.BackHandler { if (!locked) dismiss() }
     Box(
         Modifier
             .fillMaxSize()
@@ -967,11 +1022,12 @@ private fun Viewer(items: List<LibraryItem>, startIndex: Int, onDismiss: () -> U
             ) { page ->
                 ViewerPage(
                     items[page],
-                    active = page == pagerState.currentPage,
+                    active = items[page].id == idOnScreen,
                     onZoomedChange = { zoomed = it },
                     onOpen = { openExternally(context, items[page]) },
                     locked = locked,
                     onLockedChange = { locked = it },
+                    controlsFocusRequest = controlsFocusRequest,
                     canGoPrevious = page > 0,
                     canGoNext = page < items.lastIndex,
                     onStep = { step -> scope.launch { pagerState.animateScrollToPage((pagerState.currentPage + step).coerceIn(0, items.lastIndex)) } },
@@ -1010,11 +1066,17 @@ private fun Viewer(items: List<LibraryItem>, startIndex: Int, onDismiss: () -> U
                         .fillMaxWidth()
                         .windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Top))
                         .background(Brush.verticalGradient(listOf(Color.Black.copy(alpha = 0.6f), Color.Transparent)))
-                        .padding(horizontal = Spacing.Xs, vertical = Spacing.Xs),
+                        .padding(horizontal = Spacing.Xs, vertical = Spacing.Xs)
+                        .onPreviewKeyEvent { event ->
+                            if (!onPlayablePage || event.key != Key.DirectionDown) return@onPreviewKeyEvent false
+                            // The header is outside the pager. Send Down to the current player instead of relying on focus search.
+                            if (event.type == KeyEventType.KeyDown && event.nativeKeyEvent.repeatCount == 0) controlsFocusRequest++
+                            true
+                        },
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     val tint = IconButtonDefaults.iconButtonColors(contentColor = Color.White)
-                    IconButton(onClick = onDismiss, colors = tint, modifier = Modifier.focusRing(CircleShape)) {
+                    IconButton(onClick = dismiss, colors = tint, modifier = Modifier.focusRing(CircleShape)) {
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = stringResource(R.string.action_back))
                     }
                     Text(
@@ -1136,9 +1198,9 @@ private fun Viewer(items: List<LibraryItem>, startIndex: Int, onDismiss: () -> U
 }
 
 @Composable
-private fun ViewerPage(item: LibraryItem, active: Boolean, onZoomedChange: (Boolean) -> Unit, onOpen: () -> Unit, locked: Boolean, onLockedChange: (Boolean) -> Unit, canGoPrevious: Boolean, canGoNext: Boolean, enterFrom: Int, onEdgeSwipe: (Int) -> Unit, onStep: (Int) -> Unit, slideReady: () -> Boolean) {
+private fun ViewerPage(item: LibraryItem, active: Boolean, onZoomedChange: (Boolean) -> Unit, onOpen: () -> Unit, locked: Boolean, onLockedChange: (Boolean) -> Unit, controlsFocusRequest: Int, canGoPrevious: Boolean, canGoNext: Boolean, enterFrom: Int, onEdgeSwipe: (Int) -> Unit, onStep: (Int) -> Unit, slideReady: () -> Boolean) {
     if (item.mimeType.startsWith("video/") || item.mimeType.startsWith("audio/")) {
-        VideoViewer(Uri.parse(item.contentUri), isAudio = item.mimeType.startsWith("audio/"), active = active, onZoomedChange = onZoomedChange, onOpen = onOpen, locked = locked, onLockedChange = onLockedChange,
+        VideoViewer(Uri.parse(item.contentUri), isAudio = item.mimeType.startsWith("audio/"), active = active, onZoomedChange = onZoomedChange, onOpen = onOpen, locked = locked, onLockedChange = onLockedChange, controlsFocusRequest = controlsFocusRequest,
             canGoPrevious = canGoPrevious, canGoNext = canGoNext, enterFrom = enterFrom, onEdgeSwipe = onEdgeSwipe, slideReady = slideReady)
         return
     }

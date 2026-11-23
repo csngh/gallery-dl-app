@@ -12,6 +12,8 @@ final class AppModel: ObservableObject {
     let sync: SyncManager
 
     @Published private(set) var pythonReady = false
+    /// Set when the embedded Python could not start: nothing can be checked or downloaded then.
+    @Published private(set) var pythonFailed = false
     @Published private(set) var galleryDlVersion = ""
     @Published var transfer: Transfer?
     @Published var favoritesTransfer: FavoritesTransfer?
@@ -130,7 +132,7 @@ final class AppModel: ObservableObject {
     func boot() async {
         guard !pythonReady else { return }
         let started: Bool = await Task.detached { (try? PythonRuntime.shared.start()) != nil }.value
-        guard started else { return }
+        guard started else { pythonFailed = true; return }
         let info = try? await PythonRuntime.shared.call("info")
         galleryDlVersion = info?["gallery_dl"] as? String ?? ""
         pythonReady = true
@@ -138,8 +140,10 @@ final class AppModel: ObservableObject {
         engine.resumeOnLaunch()
     }
 
-    func waitUntilReady() async {
-        while !pythonReady { try? await Task.sleep(nanoseconds: 50_000_000) }
+    /// Waits for Python to start; false when it could not, so a caller does not wait for ever.
+    func waitUntilReady() async -> Bool {
+        while !pythonReady && !pythonFailed { try? await Task.sleep(nanoseconds: 50_000_000) }
+        return pythonReady
     }
 
     func sceneChanged(_ phase: ScenePhase) {

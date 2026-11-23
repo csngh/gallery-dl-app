@@ -301,6 +301,10 @@ private struct FoldersContent: View {
                             FolderCard(folder: folder, videos: videosByFolder[folder.id] ?? [])
                                 .onTapGesture { model.open(folder) }
                                 .onLongPressGesture { showActions(folder) }
+                                .onMac { $0.contextMenu {
+                                    Button { ui.present(TagDialog(folderId: folder.id, initial: folder.tag)) } label: { Label(S.actionTagFolder, systemImage: "tag") }
+                                    Button(role: .destructive) { confirmDelete(folder) } label: { Label(S.actionDeleteFolder, systemImage: "trash") }
+                                } }
                         }
                     }
                     .padding(Spacing.md)
@@ -312,7 +316,7 @@ private struct FoldersContent: View {
     /// The grid button in the Library's top bar: choose how many columns the folders are shown in (2 or 3), and their date order.
     private var listColumnsMenu: some View {
         Menu {
-            ForEach(2...3, id: \.self) { count in
+            ForEach(Platform.libraryColumns, id: \.self) { count in
                 Button { settings.libraryColumns = count } label: {
                     if count == settings.libraryColumns {
                         Label(S.columnsOption(count), systemImage: "checkmark")
@@ -482,6 +486,7 @@ private struct FolderContent: View {
                                     }
                                 }
                                 .onLongPressGesture { model.toggleSelected(item.id) }
+                                .onMac { $0.contextMenu { itemMenu(item) } }
                         }
                     }
                     .padding(Spacing.md)
@@ -493,7 +498,7 @@ private struct FolderContent: View {
     /// The grid button in a folder's top bar: choose how many columns the files are shown in (2 to 4), and their date order.
     private var columnsMenu: some View {
         Menu {
-            ForEach(2...4, id: \.self) { count in
+            ForEach(Platform.folderColumns, id: \.self) { count in
                 Button { settings.folderColumns = count } label: {
                     if count == settings.folderColumns {
                         Label(S.columnsOption(count), systemImage: "checkmark")
@@ -532,6 +537,26 @@ private struct FolderContent: View {
             return
         }
         ShareSheet.present(url)
+    }
+
+    /// The right-click menu of a file on the Mac, with what the selection bar does on the iPhone.
+    @ViewBuilder private func itemMenu(_ item: LibraryItem) -> some View {
+        Button { model.toggleSelected(item.id) } label: {
+            Label(model.selection.contains(item.id) ? S.actionDeselect : S.actionSelect, systemImage: "checkmark.circle")
+        }
+        if !isFavoritesFolder(folder.name) {
+            Button { ui.present(FavoritesAddedDialog(added: store.addFavorites([item]))) } label: { Label(S.actionFavorite, systemImage: "star") }
+        }
+        Button { ui.present(ItemDetailsDialog(item: item)) } label: { Label(S.actionDetails, systemImage: "info.circle") }
+        Button { ShareSheet.present(item.fileURL) } label: { Label(S.actionShareSave, systemImage: "square.and.arrow.up") }
+        Button { ShareSheet.reveal(item.fileURL) } label: { Label(S.actionShowInFinder, systemImage: "folder") }
+        if item.isVideo, let enhance = Platform.enhance {
+            Button { enhance(item, ui) } label: { Label(S.actionEnhance, systemImage: "wand.and.stars") }
+        }
+        Divider()
+        Button(role: .destructive) {
+            ui.present(ConfirmDialog(title: S.deleteItemTitle, message: S.deleteItemMessage, confirmLabel: S.actionDelete) { store.deleteItems([item.id]) })
+        } label: { Label(S.actionDelete, systemImage: "trash") }
     }
 
     private func confirmDeleteSelected() {
@@ -619,14 +644,14 @@ struct ViewerOverlay: View {
         // The edge swipe is only for pictures: dragging a playing video across the screen made it lag, and a video
         // already has its own sideways swipe (scrubbing).
         let onVideoPage = items.indices.contains(page) && (items[page].isVideo || items[page].isAudio)
-        SwipeBackContainer(enabled: page == 0 && !zoomed && !onVideoPage && !locked && !scrubbing, onBack: { ui.viewer = nil }) {
+        SwipeBackContainer(enabled: !Platform.isMac && page == 0 && !zoomed && !onVideoPage && !locked && !scrubbing, onBack: { ui.viewer = nil }) {
             ZStack(alignment: .top) {
                 Color.black.opacity(1 - Double(min(dragY / 500, 0.7))).ignoresSafeArea()
                 if items.isEmpty {
                     Color.clear.onAppear { ui.viewer = nil }
                 } else {
                     Group {
-                        if onVideoPage {
+                        if onVideoPage || Platform.isMac {
                             // A video page cannot be swiped to another file (a sideways swipe scrubs), so it is shown on
                             // its own. Inside the swipeable pager, turning the screen could leave it half-way between two
                             // pages, with two videos sharing one landscape screen.
@@ -638,6 +663,7 @@ struct ViewerOverlay: View {
                             .id(items[page].id)
                             .ignoresSafeArea()
                         } else {
+                            #if os(iOS)
                             TabView(selection: $page) {
                                 ForEach(Array(items.enumerated()), id: \.element.id) { index, item in
                                     ViewerPage(item: item, active: index == page, zoomed: $zoomed, locked: $locked, scrubbing: $scrubbing).tag(index)
@@ -645,9 +671,11 @@ struct ViewerOverlay: View {
                             }
                             .tabViewStyle(.page(indexDisplayMode: .never))
                             .ignoresSafeArea()
+                            #endif
                         }
                         // Zoomed in, the picture has the screen to itself: no title bar over it.
                         if !locked && !zoomed { topBar(items) }
+                        macControls(count: items.count)
                     }
                     .offset(y: dragY)
                 }
@@ -656,7 +684,7 @@ struct ViewerOverlay: View {
             .simultaneousGesture(
                 DragGesture(minimumDistance: 20)
                     .onChanged { value in
-                        guard !zoomed, !locked, !scrubbing, value.translation.height > 0, abs(value.translation.height) > abs(value.translation.width) else { return }
+                        guard !Platform.isMac, !zoomed, !locked, !scrubbing, value.translation.height > 0, abs(value.translation.height) > abs(value.translation.width) else { return }
                         dragY = value.translation.height
                     }
                     .onEnded { value in
@@ -676,10 +704,45 @@ struct ViewerOverlay: View {
             }
         }
         // The viewer is full screen: the status bar steps aside while it is open.
-        .statusBarHidden(true)
+        .hidingStatusBar()
         // Closing the viewer puts the screen back to portrait (a video may have turned it to landscape).
         .onDisappear { ScreenOrientation.lockPortrait() }
     }
+
+    /// On the Mac the files are changed with the arrow keys or the arrows at the edges, and Esc closes the viewer.
+    @ViewBuilder private func macControls(count: Int) -> some View {
+        #if os(macOS)
+        ZStack {
+            HStack {
+                if page > 0 { edgeArrow("chevron.left") { go(-1, of: count) } }
+                Spacer(minLength: 0)
+                if page < count - 1 { edgeArrow("chevron.right") { go(1, of: count) } }
+            }
+            // Keyboard shortcuts: hidden buttons, so they work without anything having the focus.
+            HStack {
+                Button("") { go(-1, of: count) }.keyboardShortcut(.leftArrow, modifiers: [])
+                Button("") { go(1, of: count) }.keyboardShortcut(.rightArrow, modifiers: [])
+                Button("") { ui.viewer = nil }.keyboardShortcut(.cancelAction)
+            }
+            .opacity(0).frame(width: 0, height: 0).allowsHitTesting(false)
+        }
+        .padding(.horizontal, Spacing.sm)
+        .frame(maxHeight: .infinity)
+        // The arrows sit above the picture but leave the bar at the bottom of a video clear.
+        .padding(.top, 72).padding(.bottom, 96)
+        #endif
+    }
+
+    #if os(macOS)
+    private func edgeArrow(_ symbol: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: symbol).font(.system(size: 22, weight: .semibold)).foregroundColor(.white)
+                .frame(width: 44, height: 44)
+                .background(Circle().fill(Color.black.opacity(0.45)))
+        }
+        .buttonStyle(.plain)
+    }
+    #endif
 
     /// Moves to the previous (-1) or next (+1) file with a slide.
     private func go(_ step: Int, of count: Int) {
@@ -707,6 +770,9 @@ struct ViewerOverlay: View {
             Menu {
                 Button { ui.present(ItemDetailsDialog(item: current)) } label: { Label(S.actionDetails, systemImage: "info.circle") }
                 Button { ShareSheet.present(current.fileURL) } label: { Label(S.actionShareSave, systemImage: "square.and.arrow.up") }
+                if current.isVideo, let enhance = Platform.enhance {
+                    Button { enhance(current, ui) } label: { Label(S.actionEnhance, systemImage: "wand.and.stars") }
+                }
                 Button(role: .destructive) {
                     ui.present(ConfirmDialog(
                         title: S.deleteItemTitle, message: S.deleteItemMessage, confirmLabel: S.actionDelete,
@@ -768,6 +834,7 @@ private struct OpenButton: View {
 /// The system file picker. SwiftUI's own `fileImporter` is not used: on iOS 15 it keeps believing the picker is open when
 /// it is dismissed by swiping it down, and the button that opened it then never opens it again. This keeps no such state,
 /// so a picker that was swiped away or cancelled changes nothing.
+#if canImport(UIKit)
 enum FilePicker {
     private static var delegate: PickerDelegate?
 
@@ -796,6 +863,8 @@ enum FilePicker {
 
 /// The system share sheet, which is how a file is opened in another app on iOS.
 enum ShareSheet {
+    @MainActor static func reveal(_ url: URL) {}
+
     @MainActor static func present(_ url: URL) { present([url]) }
 
     /// Several files at once; the sheet offers "Save to Files" as well as the apps that take files.
@@ -806,6 +875,33 @@ enum ShareSheet {
         top.present(UIActivityViewController(activityItems: urls, applicationActivities: nil), animated: true)
     }
 }
+#else
+/// The Mac's open panel.
+enum FilePicker {
+    @MainActor static func present(types: [UTType], onPick: @escaping (URL) -> Void) {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = types
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        onPick(url)
+    }
+}
+
+/// The Mac's share menu, which also offers "Save" and "AirDrop". Several files go through one picker.
+enum ShareSheet {
+    @MainActor static func reveal(_ url: URL) { NSWorkspace.shared.activateFileViewerSelecting([url]) }
+
+    @MainActor static func present(_ url: URL) { present([url]) }
+
+    @MainActor static func present(_ urls: [URL]) {
+        guard !urls.isEmpty, let view = NSApp.keyWindow?.contentView else { return }
+        let picker = NSSharingServicePicker(items: urls)
+        let anchor = NSRect(x: view.bounds.midX, y: view.bounds.midY, width: 1, height: 1)
+        picker.show(relativeTo: anchor, of: view, preferredEdge: .minY)
+    }
+}
+#endif
 
 /// Says how many files went into Favorites, and closes itself.
 struct FavoritesAddedDialog: View {

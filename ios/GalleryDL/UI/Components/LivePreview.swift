@@ -1,5 +1,9 @@
 import SwiftUI
+#if canImport(UIKit)
 import UIKit
+#else
+import AppKit
+#endif
 
 /// How many random videos a folder cover cycles through, and how long clips cross-fade into each other.
 private let folderClips = 6
@@ -24,7 +28,7 @@ final class PreviewHost: ObservableObject {
     @Published var appActive = true
     @Published var viewerOpen = false
     @Published private var lowPower = ProcessInfo.processInfo.isLowPowerModeEnabled
-    @Published private var reduceMotion = UIAccessibility.isReduceMotionEnabled
+    @Published private var reduceMotion = Platform.reduceMotion
     @Published private var memoryLow = false
 
     /// A safety limit on tiles animating together; far more than fit on a screen.
@@ -37,10 +41,10 @@ final class PreviewHost: ObservableObject {
             center.addObserver(forName: .NSProcessInfoPowerStateDidChange, object: nil, queue: .main) { [weak self] _ in
                 Task { @MainActor in self?.lowPower = ProcessInfo.processInfo.isLowPowerModeEnabled }
             },
-            center.addObserver(forName: UIAccessibility.reduceMotionStatusDidChangeNotification, object: nil, queue: .main) { [weak self] _ in
-                Task { @MainActor in self?.reduceMotion = UIAccessibility.isReduceMotionEnabled }
+            Platform.reduceMotionCenter.addObserver(forName: Platform.reduceMotionChanged, object: nil, queue: .main) { [weak self] _ in
+                Task { @MainActor in self?.reduceMotion = Platform.reduceMotion }
             },
-            center.addObserver(forName: UIApplication.didReceiveMemoryWarningNotification, object: nil, queue: .main) { [weak self] _ in
+            center.addObserver(forName: Platform.memoryWarning, object: nil, queue: .main) { [weak self] _ in
                 Task { @MainActor in self?.memoryLow = true }
             },
         ]
@@ -51,7 +55,7 @@ final class PreviewHost: ObservableObject {
     /// Called whenever the app comes back to the front.
     func refreshSystemState() {
         lowPower = ProcessInfo.processInfo.isLowPowerModeEnabled
-        reduceMotion = UIAccessibility.isReduceMotionEnabled
+        reduceMotion = Platform.reduceMotion
         memoryLow = false
     }
 
@@ -89,15 +93,27 @@ final class PreviewHost: ObservableObject {
 final class StripClock: NSObject {
     static let shared = StripClock()
     private let tiles = NSHashTable<StripController>.weakObjects()
+    #if canImport(UIKit)
     private var link: CADisplayLink?
+    #else
+    private var link: Timer?
+    #endif
     private var last: CFTimeInterval = 0
 
     func add(_ tile: StripController) {
         tiles.add(tile)
         guard link == nil else { return }
+        #if canImport(UIKit)
         let link = CADisplayLink(target: self, selector: #selector(fire(_:)))
         link.preferredFramesPerSecond = 30
         link.add(to: .main, forMode: .common)
+        #else
+        // A Mac has no display link on the main run loop that older systems share, so a timer at 30 steps a second does it.
+        let link = Timer(timeInterval: 1.0 / 30, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated { self?.tick(at: CACurrentMediaTime()) }
+        }
+        RunLoop.main.add(link, forMode: .common)
+        #endif
         self.link = link
         last = 0
     }
@@ -109,8 +125,11 @@ final class StripClock: NSObject {
         link = nil
     }
 
-    @objc private func fire(_ link: CADisplayLink) {
-        let now = link.timestamp
+    #if canImport(UIKit)
+    @objc private func fire(_ link: CADisplayLink) { tick(at: link.timestamp) }
+    #endif
+
+    private func tick(at now: CFTimeInterval) {
         let step = last == 0 ? 1.0 / 30 : min(now - last, 0.25)
         last = now
         for tile in tiles.allObjects { tile.advance(by: step) }
@@ -120,9 +139,10 @@ final class StripClock: NSObject {
 /// Shows the frames of a strip by setting a layer's contents directly, so a tile animating at 30 frames a second does
 /// not make SwiftUI redraw anything. The last frame of a strip that just ended is kept on a second layer and fades out
 /// over the next strip.
+#if canImport(UIKit)
 final class StripLayerView: UIView {
-    private let current = CALayer()
-    private let held = CALayer()
+    fileprivate let current = CALayer()
+    fileprivate let held = CALayer()
 
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -143,7 +163,36 @@ final class StripLayerView: UIView {
         current.frame = bounds
         held.frame = bounds
     }
+}
+#else
+final class StripLayerView: NSView {
+    fileprivate let current = CALayer()
+    fileprivate let held = CALayer()
 
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        wantsLayer = true
+        layer?.masksToBounds = true
+        for layer in [current, held] {
+            layer.contentsGravity = .resizeAspectFill
+            layer.masksToBounds = true
+            layer.actions = ["contents": NSNull(), "opacity": NSNull(), "bounds": NSNull(), "position": NSNull()]
+            self.layer?.addSublayer(layer)
+        }
+        held.opacity = 0
+    }
+
+    required init?(coder: NSCoder) { fatalError("not used") }
+
+    override func layout() {
+        super.layout()
+        current.frame = bounds
+        held.frame = bounds
+    }
+}
+#endif
+
+extension StripLayerView {
     func show(_ image: CGImage) { current.contents = image }
 
     /// Keeps what is on screen and fades it out, while the next strip starts underneath.
@@ -167,6 +216,7 @@ final class StripLayerView: UIView {
     }
 }
 
+#if canImport(UIKit)
 private struct StripLayerRepresentable: UIViewRepresentable {
     let controller: StripController
 
@@ -180,6 +230,21 @@ private struct StripLayerRepresentable: UIViewRepresentable {
 
     static func dismantleUIView(_ view: StripLayerView, coordinator: ()) { view.clear() }
 }
+#else
+private struct StripLayerRepresentable: NSViewRepresentable {
+    let controller: StripController
+
+    func makeNSView(context: Context) -> StripLayerView {
+        let view = StripLayerView()
+        controller.sink = view
+        return view
+    }
+
+    func updateNSView(_ view: StripLayerView, context: Context) {}
+
+    static func dismantleNSView(_ view: StripLayerView, coordinator: ()) { view.clear() }
+}
+#endif
 
 /// Plays the saved strips of one tile: a single video loops its own strip; a folder cover cycles through the strips of a
 /// few random videos from its folder. Each frame is decoded just before it is shown, off the main thread, so only a

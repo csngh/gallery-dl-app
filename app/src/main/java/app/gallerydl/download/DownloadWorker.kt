@@ -17,6 +17,8 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.job
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.io.File
 
@@ -33,7 +35,11 @@ class DownloadWorker(context: Context, params: WorkerParameters) : CoroutineWork
         runCatching { notifications.storageFull(container.storageMonitor.usedPercent.value) }
     }
 
-    override suspend fun doWork(): Result {
+    // A worker that replaces this one (the Wi-Fi only setting changed) waits here until this one has put its task back in the
+    // queue: two runs at once would share gallery-dl's settings and the task's cache folder.
+    override suspend fun doWork(): Result = drainLock.withLock { drain() }
+
+    private suspend fun drain(): Result {
         val tasks = container.database.taskDao()
         tasks.resetInterrupted()
         // Foreground promotion can be refused when the worker starts in the background; downloading still works.
@@ -147,8 +153,19 @@ class DownloadWorker(context: Context, params: WorkerParameters) : CoroutineWork
         archive.parentFile?.mkdirs()
         val knownFiles = runCatching { container.libraryRepository.fileNamesFor(task.url) }.getOrDefault(emptyList())
         val knownUrls = runCatching { container.libraryRepository.fileUrlsFor(task.url) }.getOrDefault(emptyList())
-        val outcome = withContext(Dispatchers.IO) {
-            runCatching { container.pythonBridge.download(task.url, outDir.path, archive.path, optionsJson, listener, knownFiles, knownUrls) }
+        // Not cancellable: gallery-dl stops by itself (the listener tells it to), and the clean-up that puts the task back
+        // in the queue when the system stopped the worker must still run then. A worker that was cancelled resumes
+        // cancelled, so the code after this block would never run: the task is put back from inside it instead.
+        val outcome = withContext(NonCancellable + Dispatchers.IO) {
+            val result = runCatching { container.pythonBridge.download(task.url, outDir.path, archive.path, optionsJson, listener, knownFiles, knownUrls) }
+            if (!registry.isRequested(task.id) && !coroutineJob.isActive) {
+                // The system stopped the worker (network lost, the Wi-Fi only setting changed): the task goes back in
+                // the queue, and the run that follows skips the files the library already has.
+                runCatching { tasks.pause(task.id) }
+                outDir.deleteRecursively()
+                throw CancellationException("Worker stopped")
+            }
+            result
         }
         val userCancelled = registry.isRequested(task.id)
         registry.clear(task.id)
@@ -160,12 +177,6 @@ class DownloadWorker(context: Context, params: WorkerParameters) : CoroutineWork
             withContext(NonCancellable) { tasks.pause(task.id) }
             pauseForStorage()
             return
-        }
-        if (!userCancelled && coroutineJob.isCancelled) {
-            // The system stopped the worker (network lost, ...). Keep the task queued; the resumed run
-            // skips the files the library already has.
-            withContext(NonCancellable) { tasks.pause(task.id) }
-            throw CancellationException("Worker stopped")
         }
         val cancelled = userCancelled
 
@@ -241,6 +252,7 @@ class DownloadWorker(context: Context, params: WorkerParameters) : CoroutineWork
 
     companion object {
         const val UNIQUE_NAME = "download-queue"
+        private val drainLock = Mutex()
         private const val NOTIFICATION_INTERVAL_MS = 1_000L
         private const val STORAGE_CHECK_MS = 2_000L
         private const val MAX_ERROR_CHARS = 2_000

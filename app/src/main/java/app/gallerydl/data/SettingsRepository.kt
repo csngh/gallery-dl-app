@@ -83,6 +83,11 @@ class SettingsRepository(private val context: Context) {
         )
     }
 
+    /** Keep the original dark appearance unless the user chooses light. */
+    val darkAppearance: Flow<Boolean> = context.settingsStore.data.map { it[DARK_APPEARANCE] ?: true }
+
+    suspend fun setDarkAppearance(dark: Boolean) = context.settingsStore.edit { it[DARK_APPEARANCE] = dark }
+
     /** The short sound played with the startup logo. On by default. */
     val startupSound: Flow<Boolean> = context.settingsStore.data.map { it[STARTUP_SOUND] ?: true }
 
@@ -216,6 +221,7 @@ class SettingsRepository(private val context: Context) {
         val WIFI_ONLY = booleanPreferencesKey("opt_wifi_only")
         val COOKIES_ON = booleanPreferencesKey("opt_cookies_on")
         val STARTUP_SOUND = booleanPreferencesKey("startup_sound")
+        val DARK_APPEARANCE = booleanPreferencesKey("dark_appearance")
         val LIVE_PREVIEWS = booleanPreferencesKey("live_previews")
         val PREVIEW_SPEED = floatPreferencesKey("preview_speed")
         val FOLDER_COLUMNS = intPreferencesKey("folder_columns")

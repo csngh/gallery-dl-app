@@ -15,6 +15,7 @@ mkdir -p "$APP/app"
 rsync -au --delete "$PROJECT_DIR/python/" "$APP/app/"
 # One source of truth: the Android app's bridge runs unchanged on iOS.
 cp "$REPO_ROOT/app/src/main/python/gdl_bridge.py" "$APP/app/gdl_bridge.py"
+cp "$REPO_ROOT/app/src/main/python/gdl_plugins.py" "$APP/app/gdl_plugins.py"
 rsync -au --delete "$PROJECT_DIR/app_packages/" "$APP/app_packages/"
 
 source "$PROJECT_DIR/Python.xcframework/build/utils.sh"

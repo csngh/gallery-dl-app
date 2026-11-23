@@ -1,6 +1,5 @@
 import Foundation
 import Network
-import UIKit
 
 /// A copy of the app on the network.
 struct SyncDevice: Identifiable {
@@ -98,6 +97,9 @@ final class SyncManager: ObservableObject {
     private var openConnection: SyncConnection?
     private var receivingFrom = ""
     private var running = false
+    /// Bumped by every start and every stop. A start that took long to listen (no usable network, a port taken)
+    /// puts nothing in place once a newer start has begun or the screen has been closed.
+    private var generation = 0
 
     init(store: AppStore) {
         self.store = store
@@ -105,18 +107,26 @@ final class SyncManager: ObservableObject {
         let id = defaults.string(forKey: "syncDeviceId") ?? UUID().uuidString.lowercased()
         defaults.set(id, forKey: "syncDeviceId")
         deviceId = id
-        deviceName = defaults.string(forKey: "syncDeviceName") ?? UIDevice.current.name
+        deviceName = defaults.string(forKey: "syncDeviceName") ?? Platform.deviceName
     }
 
-    private func info() -> DeviceInfo { DeviceInfo(alias: deviceName, fingerprint: deviceId, port: Int(port == 0 ? localSendPort : port)) }
+    private func info() -> DeviceInfo { DeviceInfo(alias: deviceName, fingerprint: deviceId, port: Int(port == 0 ? localSendPort : port), deviceType: Platform.deviceType) }
     private var client: LocalSendClient { LocalSendClient(me: { [weak self] in self?.info() ?? DeviceInfo(alias: "iPhone", fingerprint: "", port: Int(localSendPort)) }) }
 
     // MARK: Starting and stopping
 
-    func start() async {
-        guard !running else { return }
+    /// Starts listening, and with `searching` also looking for other devices. The Mac listens from the moment the app opens,
+    /// so an offer reaches it on any screen, and searches only while the Sync screen is open; the iPhone does both only
+    /// while that screen is open.
+    func start(searching: Bool = true) async {
+        guard !running else {
+            if searching { beginSearching() }
+            return
+        }
         running = true
         problem = nil
+        generation += 1
+        let mine = generation
         let adapter = SyncAdapter(info: { [weak self] in self?.info() ?? DeviceInfo(alias: "iPhone", fingerprint: "", port: Int(localSendPort)) })
         adapter.manager = self
         let receiver = LocalSendReceiver(cacheDir: FileManager.default.temporaryDirectory, listener: adapter)
@@ -124,13 +134,30 @@ final class SyncManager: ObservableObject {
         do {
             port = try await server.start()
         } catch {
-            problem = S.syncCannotListen
-            running = false
+            // Only the start that is still current may report a problem: a stop, or a newer start, owns the state now.
+            if mine == generation {
+                problem = S.syncCannotListen
+                running = false
+            }
+            return
+        }
+        // The screen may have been closed, or the screen opened again, while the server was starting: this start
+        // then owns nothing and takes its own server down, instead of leaving it listening and announcing.
+        guard running, mine == generation else {
+            server.stop()
+            receiver.stop()
+            // The port is only cleared when nothing owns it: a newer start may have set its own by now.
+            if !running { port = 0 }
             return
         }
         self.adapter = adapter
         self.receiver = receiver
         self.server = server
+        if searching { beginSearching() }
+    }
+
+    private func beginSearching() {
+        guard searchTask == nil else { return }
         searchTask = Task { [weak self] in
             while !Task.isCancelled {
                 await self?.search()
@@ -139,9 +166,19 @@ final class SyncManager: ObservableObject {
         }
     }
 
+    /// Stops looking for devices but keeps listening, so offers still arrive.
+    func stopSearching() {
+        searchTask?.cancel()
+        searchTask = nil
+        seen = [:]
+        devices = []
+    }
+
     func stop() {
         running = false
+        generation += 1
         searchTask?.cancel()
+        searchTask = nil
         sendTask?.cancel()
         decisionTimer?.cancel()
         resolve(false)
@@ -277,21 +314,28 @@ final class SyncManager: ObservableObject {
         let toSave = files.filter { $0.id.hasPrefix("fav-") }.count
         var savedSoFar = 0
         let byName = Dictionary(files.map { ($0.fileName, $0) }, uniquingKeysWith: { first, _ in first })
-        if let f = byName[linksFileName], let data = try? Data(contentsOf: dir.appendingPathComponent(safe(f.id))),
-           let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any], let links = object["links"] as? [[String: Any]] {
+        // A manifest is a small JSON file and it is read whole, so one larger than this is not read at all: another
+        // device states the size it will send, but it is not trusted, and the file on disk is what is checked.
+        let maxManifest = LocalSendReceiver.maxManifestSize
+        func manifest(_ file: FileInfo) -> [String: Any]? {
+            let url = dir.appendingPathComponent(safe(file.id))
+            let size = (try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? Int64) ?? 0
+            guard size > 0, size <= maxManifest,
+                  let data = try? Data(contentsOf: url),
+                  let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
+            return object
+        }
+        if let object = byName[linksFileName].flatMap(manifest), let links = object["links"] as? [[String: Any]] {
             for link in links {
-                guard let url = link["url"] as? String else { continue }
-                // Only web links: what another device sends is still checked before it reaches Home.
-                let web = url.lowercased().hasPrefix("http://") || url.lowercased().hasPrefix("https://")
-                if web && !store.hasTask(url: url) {
+                guard let url = link["url"] as? String, isPublicWebLink(url) else { continue }
+                if !store.hasTask(url: url) {
                     store.enqueue(url: url, site: (link["site"] as? String).flatMap { $0.isEmpty ? nil : $0 })
                     linksAdded += 1
                 }
             }
         }
-        if let f = byName[favoritesFileName], let data = try? Data(contentsOf: dir.appendingPathComponent(safe(f.id))),
-           let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any], let items = object["items"] as? [[String: Any]] {
-            let web = { (u: String) in u.isEmpty || u.lowercased().hasPrefix("http://") || u.lowercased().hasPrefix("https://") }
+        if let object = byName[favoritesFileName].flatMap(manifest), let items = object["items"] as? [[String: Any]] {
+            let web = { (u: String) in u.isEmpty || self.isPublicWebLink(u) }
             for item in items {
                 let name = (item["name"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? "(no name)"
                 guard let id = item["id"] as? String, let received = files.first(where: { $0.id == id }) else { if let id = item["id"] as? String, alreadyHere.contains(id) {} else { left.append("\(name): the video did not arrive") }; continue }
@@ -313,6 +357,40 @@ final class SyncManager: ObservableObject {
         let head = here > 0 && linksAdded + favoritesAdded > 0 ? S.syncReceived(links: linksAdded, favorites: favoritesAdded) + " " + S.syncAlreadyHere(here)
             : here > 0 && left.isEmpty ? S.syncAllHere(here) : S.syncReceived(links: linksAdded, favorites: favoritesAdded)
         status = .finished(head + (left.isEmpty ? "" : " " + S.syncLeftOut(left.count, sent: false)), details: left)
+    }
+
+    /// Whether an address from another device may reach Home or Favorites. It still has to be a public web address:
+    /// a device on this network must not make the app fetch the network's own services (a router's page, a machine).
+    /// A name that only resolves to a private address (a wildcard DNS name, for one) is not caught here.
+    private func isPublicWebLink(_ text: String) -> Bool {
+        guard let url = URL(string: text), var host = url.host?.lowercased(),
+              ["http", "https"].contains(url.scheme?.lowercased() ?? "") else { return false }
+        if host.hasPrefix("[") { return false }                         // a bare IPv6 address, which may be this network's
+        if host.hasSuffix(".") { host.removeLast() }
+        if host == "localhost" || !host.contains(".") { return false }  // a machine on this network, named or bare
+        let labels = host.split(separator: ".", omittingEmptySubsequences: false)
+        // A last part made of numbers means the system reads the whole host as an address, and it has spellings of its own
+        // ("127.1", "0x7f.0.0.1", "0177.0.0.1" are all this machine). Only the plain four-part form is understood here, so
+        // every other spelling is refused.
+        guard let last = labels.last, Self.isNumberLabel(last) else { return true }
+        guard labels.count == 4 else { return false }
+        var numbers: [Int] = []
+        for label in labels {
+            guard label.allSatisfy({ $0.isASCII && $0.isNumber }), label.count == 1 || !label.hasPrefix("0"),
+                  let value = Int(label), value <= 255 else { return false }
+            numbers.append(value)
+        }
+        let (a, b) = (numbers[0], numbers[1])
+        let local = a == 0 || a == 10 || a == 127 || a >= 224 || (a == 169 && b == 254) || (a == 192 && b == 168) || (a == 172 && (16...31).contains(b))
+        return !local
+    }
+
+    /// Whether a part of a host is a number the way an address is written: decimal digits, or 0x and hex digits.
+    private static func isNumberLabel(_ label: Substring) -> Bool {
+        if label.isEmpty { return false }
+        if label.allSatisfy({ $0.isASCII && $0.isNumber }) { return true }
+        let lower = label.lowercased()
+        return lower.hasPrefix("0x") && lower.count > 2 && lower.dropFirst(2).allSatisfy { $0.isHexDigit }
     }
 
     /// The address and name a receiver uses to tell whether it already has this video, before it is uploaded.

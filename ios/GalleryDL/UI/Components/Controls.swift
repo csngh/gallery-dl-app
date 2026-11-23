@@ -373,7 +373,7 @@ extension TopBar where Leading == EmptyView, Trailing == EmptyView {
 struct ShimmerBox: View {
     var radius: CGFloat = Radius.md
     @State private var phase: CGFloat = -1
-    private let animate = !UIAccessibility.isReduceMotionEnabled
+    private let animate = !Platform.reduceMotion
 
     var body: some View {
         GeometryReader { geo in
@@ -572,7 +572,7 @@ struct ItemDetailsDialog: View {
             Text(label).textStyle(.labelLarge, color: Brand.onSurfaceVariant)
             if let url {
                 Text(url).textStyle(.bodyMedium).textSelectionIfAvailable()
-                TextPill(title: S.actionCopy, color: Brand.primary) { UIPasteboard.general.string = url }
+                TextPill(title: S.actionCopy, color: Brand.primary) { Platform.copyToClipboard(url) }
             }
             if let note { Text(note).textStyle(.bodySmall, color: Brand.onSurfaceVariant) }
         }
@@ -590,7 +590,7 @@ struct FullLinkDialog: View {
                 .frame(maxHeight: 220)
         } actions: {
             TextPill(title: S.actionClose, color: Brand.onSurfaceVariant) { ui.dismissDialog() }
-            FilledPill(title: S.actionCopy) { UIPasteboard.general.string = url; ui.dismissDialog() }
+            FilledPill(title: S.actionCopy) { Platform.copyToClipboard(url); ui.dismissDialog() }
         }
     }
 }

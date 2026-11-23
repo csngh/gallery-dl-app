@@ -20,7 +20,8 @@ private struct SyncContent: View {
     var body: some View {
         VStack(spacing: 0) {
             TopBar(title: S.syncTitle, leading: {
-                IconButton(symbol: "chevron.left", color: Brand.onSurface, label: S.actionBack, action: onBack)
+                // The Mac sidebar is the way back.
+                if !Platform.isMac { IconButton(symbol: "chevron.left", color: Brand.onSurface, label: S.actionBack, action: onBack) }
             }, trailing: {})
             SyncStatusBanner(sync: sync)
             SoftScrollView {
@@ -35,8 +36,11 @@ private struct SyncContent: View {
             }
         }
         .task { await sync.start() }
-        .onDisappear { sync.stop() }
+        // The Mac keeps listening after the screen closes; the iPhone stops.
+        .onDisappear { if Platform.isMac { sync.stopSearching() } else { sync.stop() } }
         .onChange(of: sync.offer?.id) { _ in
+            // On the Mac the window around every screen shows the offer, so it is not shown here as well.
+            guard !Platform.isMac else { return }
             if let offer = sync.offer {
                 ui.present(SyncOfferDialog(sync: sync, offer: offer))
                 offerShown = true
@@ -54,7 +58,7 @@ private struct SyncContent: View {
         VStack(alignment: .leading, spacing: Spacing.sm) {
             heading(S.syncThisDevice)
             TextField(S.syncDeviceName, text: $sync.deviceName)
-                .textFieldStyle(.roundedBorder)
+                .outlinedTextField()
             if sync.port > 0 { Text(S.syncAddressLine(sync.port)).textStyle(.bodySmall, color: Brand.onSurfaceVariant) }
         }
     }
@@ -93,7 +97,7 @@ private struct SyncContent: View {
             heading(S.syncAddByAddress)
             HStack {
                 TextField(S.syncAddressField, text: $address)
-                    .textFieldStyle(.roundedBorder)
+                    .outlinedTextField()
                     .keyboardType(.numbersAndPunctuation)
                     .autocapitalization(.none)
                 OutlinedPill(title: S.syncAddAction) {
@@ -162,7 +166,7 @@ private struct SyncStatusBanner: View {
 }
 
 /// Another device wants to send something: nothing is received until the person agrees.
-private struct SyncOfferDialog: View {
+struct SyncOfferDialog: View {
     @EnvironmentObject private var ui: UIState
     @ObservedObject var sync: SyncManager
     let offer: SyncOfferInfo

@@ -1,5 +1,4 @@
 import SwiftUI
-import UIKit
 
 /// The animated intro: cards pop in, the badge drops and bounces, the name fades in, then everything fades out.
 /// The launch screen is plain dark, so this logo is the first and only one the user sees (same as Android).
@@ -30,7 +29,7 @@ struct SplashOverlay: View {
 
     private func run() async {
         // Reduce Motion is the iOS counterpart of Android's "animations off": skip the intro entirely.
-        if UIAccessibility.isReduceMotionEnabled {
+        if Platform.reduceMotion {
             onFinished()
             return
         }

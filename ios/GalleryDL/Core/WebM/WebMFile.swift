@@ -377,7 +377,10 @@ final class WebMFile {
         // Laced blocks hold several frames; video from real encoders does not use them.
         guard flags & 0x06 == 0 else { return }
         let payload = start + numberLength + 3
-        let time = Double(clusterTime + relative) * timecodeScale / 1e9
+        // Both numbers come from the file: a crafted one must not overflow the sum.
+        let (blockTime, overflow) = clusterTime.addingReportingOverflow(relative)
+        guard !overflow else { return }
+        let time = Double(blockTime) * timecodeScale / 1e9
         let packet = WebMPacket(time: time, offset: payload, size: end - payload, isKey: isKey ?? (flags & 0x80 != 0))
         condition.lock()
         if number == videoNumber {

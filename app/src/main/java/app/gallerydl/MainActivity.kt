@@ -98,7 +98,13 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         val container = (application as GalleryDlApp).container
         setContent {
-            GalleryDlTheme {
+            val darkAppearance by container.darkAppearance.collectAsStateWithLifecycle()
+            LaunchedEffect(darkAppearance) {
+                val bars = androidx.core.view.WindowCompat.getInsetsController(window, window.decorView)
+                bars.isAppearanceLightStatusBars = !darkAppearance
+                bars.isAppearanceLightNavigationBars = !darkAppearance
+            }
+            GalleryDlTheme(dark = darkAppearance) {
                 // Only on a fresh start: rotating the phone or coming back to the app does not replay it.
                 var showSplash by rememberSaveable { mutableStateOf(true) }
                 val startupSound by container.startupSound.collectAsStateWithLifecycle()

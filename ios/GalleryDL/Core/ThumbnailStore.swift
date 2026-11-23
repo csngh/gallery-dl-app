@@ -1,6 +1,10 @@
 import AVFoundation
 import ImageIO
+#if canImport(UIKit)
 import UIKit
+#else
+import AppKit
+#endif
 
 /// Small still images of the library's pictures and videos, made once and kept on disk, so the library does not
 /// decode every file again each time it opens or scrolls.
@@ -12,7 +16,7 @@ final class ThumbnailStore {
 
     private let directory: URL
     /// A fast layer on top of the disk files, bounded so it can never grow large.
-    private let memory = NSCache<NSNumber, UIImage>()
+    private let memory = NSCache<NSNumber, PlatformImage>()
     /// At most two thumbnails are made at the same time, so scrolling a big folder never floods memory.
     private let workers: OperationQueue = {
         let queue = OperationQueue()
@@ -20,7 +24,7 @@ final class ThumbnailStore {
         queue.qualityOfService = .utility
         return queue
     }()
-    private var inFlight: [Int64: Task<UIImage?, Never>] = [:]
+    private var inFlight: [Int64: Task<PlatformImage?, Never>] = [:]
     private let lock = NSLock()
     private let edge: CGFloat = 480
 
@@ -38,13 +42,13 @@ final class ThumbnailStore {
     private func file(for id: Int64) -> URL { directory.appendingPathComponent("\(id).jpg") }
 
     /// The thumbnail of `item`, made first if it does not exist yet. Nil when the file cannot be decoded.
-    func image(for item: LibraryItem) async -> UIImage? {
+    func image(for item: LibraryItem) async -> PlatformImage? {
         let id = item.id
         if let cached = memory.object(forKey: NSNumber(value: id)) { return cached }
 
         let (task, isNew) = taskFor(id) { [self] in
-            Task<UIImage?, Never> {
-                let image: UIImage? = await withCheckedContinuation { continuation in
+            Task<PlatformImage?, Never> {
+                let image: PlatformImage? = await withCheckedContinuation { continuation in
                     workers.addOperation { continuation.resume(returning: self.loadOrMake(item)) }
                 }
                 if let image, let cg = image.cgImage {
@@ -60,7 +64,7 @@ final class ThumbnailStore {
 
     /// The task already making this thumbnail, or a new one. Done in plain synchronous code so the lock is never held
     /// across a suspension.
-    private func taskFor(_ id: Int64, make: () -> Task<UIImage?, Never>) -> (Task<UIImage?, Never>, Bool) {
+    private func taskFor(_ id: Int64, make: () -> Task<PlatformImage?, Never>) -> (Task<PlatformImage?, Never>, Bool) {
         lock.lock()
         defer { lock.unlock() }
         if let running = inFlight[id] { return (running, false) }
@@ -75,15 +79,15 @@ final class ThumbnailStore {
         lock.unlock()
     }
 
-    private func loadOrMake(_ item: LibraryItem) -> UIImage? {
+    private func loadOrMake(_ item: LibraryItem) -> PlatformImage? {
         let target = file(for: item.id)
-        if let data = try? Data(contentsOf: target), let image = UIImage(data: data) {
+        if let data = try? Data(contentsOf: target), let image = PlatformImage(data: data) {
             return image.preparingForDisplay() ?? image
         }
         guard let cg = item.isVideo ? videoFrame(item) : imageThumbnail(item),
-              let jpeg = UIImage(cgImage: cg).jpegData(compressionQuality: 0.85) else { return nil }
+              let jpeg = PlatformImage(cgImage: cg).jpegData(compressionQuality: 0.85) else { return nil }
         try? jpeg.write(to: target, options: .atomic)
-        let image = UIImage(cgImage: cg)
+        let image = PlatformImage(cgImage: cg)
         return image.preparingForDisplay() ?? image
     }
 

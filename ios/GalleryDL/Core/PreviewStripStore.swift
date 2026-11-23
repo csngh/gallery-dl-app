@@ -1,5 +1,9 @@
 import AVFoundation
+#if canImport(UIKit)
 import UIKit
+#else
+import AppKit
+#endif
 
 extension Notification.Name {
     /// Posted (on the main thread) when a preview strip has been saved; the object is the library item's id.
@@ -34,13 +38,13 @@ final class Strip {
 
     deinit { try? handle.close() }
 
-    func frame(_ index: Int) -> UIImage? {
+    func frame(_ index: Int) -> PlatformImage? {
         guard index >= 0, index < frameCount else { return nil }
         lock.lock()
         handle.seek(toFileOffset: offsets[index])
         let data = handle.readData(ofLength: Int(offsets[index + 1] - offsets[index]))
         lock.unlock()
-        guard let image = UIImage(data: data) else { return nil }
+        guard let image = PlatformImage(data: data) else { return nil }
         return image.preparingForDisplay() ?? image
     }
 }
@@ -246,7 +250,7 @@ final class PreviewStripStore {
         let latestStart = max(0, duration - span - 0.15)
         let start = latestStart > 0.3 ? Double.random(in: 0.15...latestStart) : 0
         let images = WebMFrames.images(of: item.fileURL, from: start, count: count, fps: fps, edge: edge)
-        let jpegs = images.compactMap { UIImage(cgImage: $0).jpegData(compressionQuality: 0.72) }
+        let jpegs = images.compactMap { PlatformImage(cgImage: $0).jpegData(compressionQuality: 0.72) }
         guard jpegs.count >= max(4, count / 2) else { return false }
         return save(jpegs, fps: fps, for: item)
     }

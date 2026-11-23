@@ -64,7 +64,11 @@ final class LinkInputModel: ObservableObject {
         guard !validating, !url.isEmpty else { return }
         validating = true
         error = nil
-        await app.waitUntilReady()
+        guard await app.waitUntilReady() else {
+            error = .engineUnavailable
+            validating = false
+            return
+        }
         let result = await app.validator.check(url)
         if result.check == .valid {
             app.store.enqueue(url: url, site: result.site)
@@ -81,6 +85,7 @@ func urlErrorMessage(_ check: UrlCheck?) -> String? {
     switch check {
     case .unsupported: return S.errorUrlUnsupported
     case .malformed: return S.errorUrlMalformed
+    case .engineUnavailable: return S.errorEngineUnavailable
     default: return nil
     }
 }
@@ -156,7 +161,7 @@ struct LinkActionsMenu: View {
 /// favicon. A site with neither is remembered for a week before it is asked again.
 final class SiteIcons {
     static let shared = SiteIcons()
-    private let cache = NSCache<NSString, UIImage>()
+    private let cache = NSCache<NSString, PlatformImage>()
     private let lock = NSLock()
     private let directory: URL = {
         let url = MediaFiles.support.appendingPathComponent("siteicons", isDirectory: true)
@@ -172,12 +177,12 @@ final class SiteIcons {
         String(host.lowercased().map { $0.isLetter || $0.isNumber || $0 == "." || $0 == "-" ? $0 : "_" })
     }
 
-    func icon(for host: String) async -> UIImage? {
+    func icon(for host: String) async -> PlatformImage? {
         if let cached = cache.object(forKey: host as NSString) { return cached }
         let file = directory.appendingPathComponent(name(host) + ".img")
         let miss = directory.appendingPathComponent(name(host) + ".none")
         if let data = try? Data(contentsOf: file) {
-            if let image = UIImage(data: data) {
+            if let image = PlatformImage(data: data) {
                 cache.setObject(image, forKey: host as NSString)
                 return image
             }
@@ -190,7 +195,7 @@ final class SiteIcons {
             var request = URLRequest(url: url)
             request.timeoutInterval = 8
             if let (data, response) = try? await URLSession.shared.data(for: request),
-               (response as? HTTPURLResponse)?.statusCode == 200, data.count <= 1_048_576, let image = UIImage(data: data) {
+               (response as? HTTPURLResponse)?.statusCode == 200, data.count <= 1_048_576, let image = PlatformImage(data: data) {
                 try? data.write(to: file, options: .atomic)
                 try? FileManager.default.removeItem(at: miss)
                 cache.setObject(image, forKey: host as NSString)
@@ -217,7 +222,7 @@ struct SiteTile: View {
     let site: String
     let iconHost: String?
     var size: CGFloat = TileSize.large
-    @State private var icon: UIImage?
+    @State private var icon: PlatformImage?
 
     var body: some View {
         let tone = siteTones[Int(javaHash(site) & Int32.max) % siteTones.count]
@@ -248,7 +253,7 @@ struct GalleryImage: View {
     let item: LibraryItem
     var fit = false
     var showShimmer = true
-    @State private var image: UIImage?
+    @State private var image: PlatformImage?
     @State private var failed = false
 
     var body: some View {

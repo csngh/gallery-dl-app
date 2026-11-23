@@ -1,5 +1,4 @@
 import Foundation
-import UIKit
 
 /// Drains the download queue one task at a time, running gallery-dl in-process. This is the iOS counterpart of
 /// Android's DownloadWorker and DownloadRepository.
@@ -16,12 +15,15 @@ final class DownloadEngine {
 
     private var draining = false
     private var currentId: Int64?
+    /// Each download gets its own number, which a cancel carries: a cancel then only ever stops the run it was meant for.
+    private var runCounter = 0
+    private var currentRun = 0
     private var cancelRequested = Set<Int64>()
     /// Runs that were stopped to wait in the queue (network lost, app left); they resume instead of failing.
     private var pausedRuns = Set<Int64>()
     /// True while no new link may start (no Wi-Fi with Wi-Fi only on, or the background time has run out).
     private var holdQueue = false
-    private var backgroundTask: UIBackgroundTaskIdentifier = .invalid
+    private let background = BackgroundWork()
 
     init(store: AppStore, settings: SettingsStore, network: NetworkMonitor, storage: StorageMonitor) {
         self.store = store
@@ -119,7 +121,10 @@ final class DownloadEngine {
         endBackgroundTaskIfIdle()
     }
 
-    private func stopPython() { Task { _ = try? await python.call("cancel") } }
+    private func stopPython() {
+        let token = currentRun
+        Task { _ = try? await python.call("cancel", ["run": token]) }
+    }
 
     // MARK: One link
 
@@ -137,6 +142,9 @@ final class DownloadEngine {
         guard store.markDownloading(task.id) else { return }   // cancelled while waiting its turn
         currentId = task.id
         defer { currentId = nil }
+        runCounter += 1
+        let runToken = runCounter
+        currentRun = runToken
 
         let run = Run()
         run.linkFolder = linkFolderName(task.url)
@@ -151,6 +159,7 @@ final class DownloadEngine {
         // the bridge remove a record an earlier version left.
         let arguments: [String: Any] = [
             "url": task.url,
+            "run": runToken,
             "base_dir": run.scratch.path,
             "archive_path": MediaFiles.archive(for: task.id).path,
             "options": settings.options.toJson(cookiesPath: settings.cookiesPath),
@@ -275,8 +284,8 @@ final class DownloadEngine {
     }
 
     func sceneEnteredBackground() {
-        guard currentId != nil || store.hasQueued, backgroundTask == .invalid else { return }
-        backgroundTask = UIApplication.shared.beginBackgroundTask(withName: "downloads") { [weak self] in
+        guard currentId != nil || store.hasQueued, !background.isActive else { return }
+        background.begin(name: "downloads") { [weak self] in
             // The system calls this on the main thread; hop onto the main actor (assumeIsolated needs iOS 17).
             Task { @MainActor in self?.backgroundTimeExpired() }
         }
@@ -295,8 +304,6 @@ final class DownloadEngine {
     }
 
     private func endBackgroundTask() {
-        guard backgroundTask != .invalid else { return }
-        UIApplication.shared.endBackgroundTask(backgroundTask)
-        backgroundTask = .invalid
+        background.end()
     }
 }

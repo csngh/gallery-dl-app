@@ -82,6 +82,8 @@ struct LibraryItem: Identifiable, Codable, Equatable {
     var addedAt: Date
     /// The direct address this file was downloaded from; nil for files saved before it was kept.
     var fileUrl: String?
+    /// Enhanced copies are independent derivatives, not downloaded originals to move during a refresh.
+    var isEnhancedCopy: Bool?
 
     var fileURL: URL { MediaFiles.root.appendingPathComponent(relativePath) }
     var isImage: Bool { mimeType.hasPrefix("image/") }

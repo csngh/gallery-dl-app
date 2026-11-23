@@ -8,14 +8,17 @@ import androidx.compose.ui.graphics.Color
 
 /**
  * Semantic colours for opposing actions: green for the positive or start action, red for the negative or
- * end action. These are the lighter Material 400 tones with dark text, because the deep 700 and 800 tones
- * sink into a dark background.
+ * end action. The foreground and fill use the same colour so it works both on its own and with a label.
  */
 object ActionColors {
-    val Positive = Color(0xFF66BB6A)
-    val OnPositive = Color(0xFF0B2A10)
-    val Negative = Color(0xFFEF5350)
-    val OnNegative = Color(0xFF2B0606)
+    val Positive: Color
+        @Composable get() = if (LocalDarkAppearance.current) Color(0xFF66BB6A) else Color(0xFF25672C)
+    val OnPositive: Color
+        @Composable get() = if (LocalDarkAppearance.current) Color(0xFF0B2A10) else Color.White
+    val Negative: Color
+        @Composable get() = MaterialTheme.colorScheme.error
+    val OnNegative: Color
+        @Composable get() = MaterialTheme.colorScheme.onError
 
     @Composable
     fun positiveIcon(): IconButtonColors = iconColors(Positive)

@@ -38,6 +38,8 @@ const val FAVORITES_FILE = "gallery-dl-favorites.json"
 private const val API = "/api/localsend/v2"
 private const val MAX_HEAD = 64 * 1024
 private const val MAX_JSON = 16 * 1024 * 1024
+/** The largest file one offer may state (1 TiB); the sender is never trusted to be sane. */
+private const val MAX_FILE_SIZE = 1L shl 40
 private const val OFFER_WAIT_SECONDS = 90L
 private const val SESSION_IDLE_MS = 60 * 1000L
 
@@ -297,10 +299,16 @@ fun httpRequest(
         val input = socket.getInputStream().buffered(64 * 1024)
         val status = readLine(input)?.split(' ')?.getOrNull(1)?.toIntOrNull() ?: throw SyncException("no answer")
         val headers = readHeaders(input)
+        // However the answer is framed, never more than the limit (plus one byte, to tell "too large" apart) is read:
+        // a device that streams for ever must not fill the memory.
+        val cap = MAX_JSON + 1L
         val body = when {
-            headers["transfer-encoding"]?.contains("chunked", ignoreCase = true) == true -> Chunked(input).readBytes()
-            headers.containsKey("content-length") -> Limited(input, headers.getValue("content-length").toLong()).readBytes()
-            else -> input.readBytes()
+            headers["transfer-encoding"]?.contains("chunked", ignoreCase = true) == true -> Limited(Chunked(input), cap).readBytes()
+            headers.containsKey("content-length") -> {
+                val length = headers.getValue("content-length").toLongOrNull() ?: throw SyncException("bad answer")
+                Limited(input, minOf(length, cap)).readBytes()
+            }
+            else -> Limited(input, cap).readBytes()
         }
         if (body.size > MAX_JSON) throw SyncException("answer too large")
         return status to body
@@ -391,29 +399,38 @@ class LocalSendReceiver(private val cacheDir: File, private val listener: Receiv
     private fun prepare(request: HttpRequest): HttpResponse {
         val body = try { readJson(request) } catch (_: Exception) { return HttpResponse.empty(400) }
         val from = try { DeviceInfo.from(body.getJSONObject("info")) } catch (_: Exception) { return HttpResponse.empty(400) }
-        val offeredList = try {
+        val offeredFiles = try {
             val map = body.getJSONObject("files")
             map.keys().asSequence().map { key ->
                 val f = map.getJSONObject(key)
-                FileInfo(f.optString("id", key), f.getString("fileName"), f.optLong("size"), f.optString("fileType", "application/octet-stream"), if (f.isNull("preview")) null else f.optString("preview"))
+                FileInfo(f.optString("id", key), f.getString("fileName"), f.optLong("size").coerceIn(0L, MAX_FILE_SIZE), f.optString("fileType", "application/octet-stream"), if (f.isNull("preview")) null else f.optString("preview"))
             }.toList()
         } catch (_: Exception) { return HttpResponse.empty(400) }
         // Only another copy of this app can send here: what arrives is read as this app's own links and videos.
         if (!from.isGalleryDl) return HttpResponse.empty(403)
+        // Two entries may carry the same id (it is a field of the entry, not its key): the first one counts. Kept as
+        // they are, the two collapse into one session entry, and the transfer waits for a file that never arrives.
+        val seenIds = HashSet<String>()
+        val offeredList = offeredFiles.filter { seenIds.add(it.id) }
         if (offeredList.isEmpty()) return HttpResponse.empty(204)
-        val list = listener.wanted(offeredList)
-        if (list.isEmpty()) return HttpResponse.empty(204)
+        // Busy is decided first: looking at the offer (listener.wanted) changes what the screen shows, which must not happen
+        // in the middle of another transfer.
         synchronized(this) {
             if (current() != null || asking) return HttpResponse.empty(409)
             asking = true
         }
-        val accepted = try { listener.offered(from, request.remoteAddress, list) } finally { asking = false }
-        if (!accepted) return HttpResponse.empty(403)
-        val id = UUID.randomUUID().toString()
-        val dir = File(cacheDir, "sync-$id").apply { mkdirs() }
-        val tokens = list.associate { it.id to UUID.randomUUID().toString() }
-        synchronized(this) { session = Session(id, from, request.remoteAddress, dir, list.associateBy { it.id }, tokens) }
-        return HttpResponse.json(JSONObject().put("sessionId", id).put("files", JSONObject(tokens)))
+        try {
+            val list = listener.wanted(offeredList)
+            if (list.isEmpty()) return HttpResponse.empty(204)
+            if (!listener.offered(from, request.remoteAddress, list)) return HttpResponse.empty(403)
+            val id = UUID.randomUUID().toString()
+            val dir = File(cacheDir, "sync-$id").apply { mkdirs() }
+            val tokens = list.associate { it.id to UUID.randomUUID().toString() }
+            synchronized(this) { session = Session(id, from, request.remoteAddress, dir, list.associateBy { it.id }, tokens) }
+            return HttpResponse.json(JSONObject().put("sessionId", id).put("files", JSONObject(tokens)))
+        } finally {
+            asking = false
+        }
     }
 
     private fun upload(request: HttpRequest): HttpResponse {
@@ -427,16 +444,20 @@ class LocalSendReceiver(private val cacheDir: File, private val listener: Receiv
         val target = File(s.dir, fileId.replace(Regex("[^A-Za-z0-9._-]"), "_"))
         var written = 0L
         var lastReport = 0L
+        // More than the offer stated is never stored: an endless body would fill the device.
+        val stated = s.files.getValue(fileId).size
+        val limit = if (stated > 0) stated else MAX_JSON.toLong()
         try {
             target.outputStream().use { out ->
                 val buffer = ByteArray(64 * 1024)
                 while (true) {
                     val n = request.body.read(buffer)
                     if (n < 0) break
+                    written += n
+                    if (written > limit) throw IOException("more than offered")
                     out.write(buffer, 0, n)
                     // A long file keeps the session alive for as long as it keeps arriving.
                     s.lastActive = System.currentTimeMillis()
-                    written += n
                     val now = System.currentTimeMillis()
                     if (now - lastReport > 250) {
                         lastReport = now

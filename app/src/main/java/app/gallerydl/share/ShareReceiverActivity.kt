@@ -26,6 +26,7 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import app.gallerydl.GalleryDlApp
 import app.gallerydl.R
 import app.gallerydl.download.UrlCheck
 import app.gallerydl.ui.AppViewModelProvider
@@ -53,8 +54,10 @@ class ShareReceiverActivity : ComponentActivity() {
             return
         }
         val addedMessage = getString(R.string.share_added)
+        val container = (application as GalleryDlApp).container
         setContent {
-            GalleryDlTheme {
+            val darkAppearance by container.darkAppearance.collectAsStateWithLifecycle()
+            GalleryDlTheme(dark = darkAppearance) {
                 SharePopup(
                     viewModel = viewModel,
                     onClose = { finish() },

@@ -24,6 +24,14 @@ targets:
       path: GalleryDL/Info.plist
       properties:
         CFBundleDisplayName: Gallery DL
+        UTImportedTypeDeclarations:
+          - UTTypeIdentifier: app.gallerydl.extractor-plugin
+            UTTypeDescription: Gallery DL Extractor Plugin
+            UTTypeConformsTo:
+              - public.zip-archive
+            UTTypeTagSpecification:
+              public.filename-extension:
+                - gdlplugin
         UILaunchScreen:
           UIColorName: LaunchBackground
         UIAppFonts:

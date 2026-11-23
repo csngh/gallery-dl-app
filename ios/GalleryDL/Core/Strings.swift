@@ -17,7 +17,9 @@ enum S {
     static let detailsFileAddressNote = "Some sites give an address that stops working after a while."
     static let actionOpenWith = "Open in another app"
     static let actionShare = "Share"
-    static let actionShareSave = "Share or save to Files"
+    static let actionShareSave = Platform.isMac ? "Share or save…" : "Share or save to Files"
+    static let actionEnhance = "Enhance video…"
+    static let actionSelect = "Select", actionDeselect = "Deselect", actionShowInFinder = "Show in Finder"
     static let actionLoopOn = "Loop this video", actionLoopOff = "Stop looping"
     static let actionLock = "Lock touch", actionUnlock = "Unlock touch"
     /// Shown over a WebM video whose sound cannot be played. `format` is the file's own name for the sound format.
@@ -61,7 +63,7 @@ enum S {
     static let syncCouldNotReach = "Could not reach that device. Check that Sync is open on it and that both are on the same Wi-Fi."
     static let syncBadAddress = "Type the address as shown on the other device, for example 192.168.1.20:53318."
     static let syncTimeoutHint = "If that device runs a VPN or firewall app, exclude Gallery DL from it, or turn it off while syncing."
-    static let syncCannotListen = "This device could not start listening on the network. Allow the local network in Settings, Privacy, Local Network, and open this screen again."
+    static let syncCannotListen = "This device could not start listening on the network. \(Platform.isMac ? "Allow the local network in System Settings, Privacy & Security, Local Network, and open this screen again." : "Allow the local network in Settings, Privacy, Local Network, and open this screen again.")"
     static let syncAddByAddress = "Add by address", syncAddressField = "192.168.1.20:53318", syncAddAction = "Add"
     static func syncReceiving(_ name: String) -> String { "Receiving from \(name)" }
     static func syncSendingTo(_ name: String) -> String { "Sending to \(name)" }
@@ -110,6 +112,7 @@ enum S {
     static let actionAdd = "Add"
     static let errorUrlMalformed = "Please enter a valid http or https link."
     static let errorUrlUnsupported = "This website is not supported."
+    static let errorEngineUnavailable = "The download engine could not start. Please close the app and open it again."
 
     static let statusQueued = "Queued", statusDownloading = "Downloading", statusCompleted = "Completed"
     static let statusFailed = "Failed", statusCancelled = "Cancelled", statusPartial = "Completed with errors"
@@ -159,12 +162,12 @@ enum S {
     static func columnsOption(_ n: Int) -> String { "\(n) columns" }
     static let deleteFolderTitle = "Delete this folder?"
     static func deleteFolderMessage(_ n: Int) -> String {
-        n == 1 ? "This will permanently delete \(n) file saved from this link from your phone."
-            : "This will permanently delete all \(n) files saved from this link from your phone."
+        n == 1 ? "This will permanently delete \(n) file saved from this link from your \(Platform.device)."
+            : "This will permanently delete all \(n) files saved from this link from your \(Platform.device)."
     }
     static let deleteSelectedTitle = "Delete the selected items?"
     static func deleteSelectedMessage(_ n: Int) -> String {
-        n == 1 ? "This will permanently delete \(n) file from your phone." : "This will permanently delete \(n) files from your phone."
+        n == 1 ? "This will permanently delete \(n) file from your \(Platform.device)." : "This will permanently delete \(n) files from your \(Platform.device)."
     }
 
     static let statLinks = "Links", statCompleted = "Completed", statPartial = "Partial", statFailed = "Failed"
@@ -185,7 +188,7 @@ enum S {
 
     static let confirmQuestion = "Do you want to continue?"
     static let deleteItemTitle = "Delete this file?"
-    static let deleteItemMessage = "This will permanently delete this file from your phone."
+    static let deleteItemMessage = "This will permanently delete this file from your \(Platform.device)."
     static let clearQueueTitle = "Clear the finished links from the Queue?"
     static let clearQueueMessage = "This only tidies the Queue. The links stay on Home, so you can refresh them again, and the downloaded files stay in your library."
     static let clearFinishedTitle = "Clear the finished links?"
@@ -233,7 +236,7 @@ enum S {
     static let settingsApplyNote = "Changes apply to the next download that starts."
 
     static let settingsLocationTitle = "Download location"
-    static let settingsLocationBody = "Where finished files are saved on your phone."
+    static let settingsLocationBody = "Where finished files are saved on your \(Platform.device)."
     static let settingsConnectionTitle = "Connection"
     static let settingsConnectionBody = "How downloads behave on slow or limited connections."
     static let optionWifiTitle = "Wi-Fi only"
@@ -256,7 +259,7 @@ enum S {
     static let removeCookiesTitle = "Remove the cookies?"
     static let removeCookiesMessage = "This will delete the imported cookies.txt from the app. You will need to import it again to download content that needs a sign-in."
     static let settingsStorageTitle = "Storage and reset"
-    static let settingsStorageBody = "Manage what the app keeps on your phone."
+    static let settingsStorageBody = "Manage what the app keeps on your \(Platform.device)."
     static func storageRecords(_ size: String) -> String { "The app's records use \(size)." }
     static func storageThumbnails(_ size: String) -> String { "The saved thumbnails and preview clips of your library use \(size)." }
     static let actionClearThumbnails = "Clear thumbnail cache"
@@ -271,8 +274,9 @@ enum S {
     static let aboutLicences = "Open-source software used: gallery-dl (GPL-2.0), Python (PSF), BeeWare Python-Apple-support (BSD-3-Clause), and the Inter typeface (SIL Open Font License 1.1)."
 
     static let optionStartupSoundTitle = "Startup sound"
-    static let optionStartupSoundBody = "Plays a short sound while the logo appears when the app opens. It stays silent when your phone is on silent or vibrate."
-    static let settingsAppearanceTitle = "Startup and previews", settingsAppearanceBody = "What happens when the app opens, and how the library looks."
+    static let optionStartupSoundBody = "Plays a short sound while the logo appears when the app opens. \(Platform.isMac ? "It stays silent when your Mac is muted." : "It stays silent when your phone is on silent or vibrate.")"
+    static let settingsAppearanceTitle = "Appearance and startup", settingsAppearanceBody = "Choose a theme and adjust startup sound and library previews."
+    static let optionThemeTitle = "Theme", optionThemeDark = "Dark", optionThemeLight = "Light"
     static let previewsPreparing = "Preparing previews"
     static func previewsProgress(_ done: Int, _ total: Int) -> String { "\(done) of \(total)" }
     static let optionLivePreviewsTitle = "Live previews"

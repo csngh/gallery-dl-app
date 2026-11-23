@@ -238,7 +238,7 @@ final class HttpBody {
         if finished { return Data() }
         if chunked {
             if left == 0 {
-                guard let sizeLine = try await reader.readLine(), let size = Int64(sizeLine.split(separator: ";").first.map { $0.trimmingCharacters(in: .whitespaces) } ?? "", radix: 16) else { throw SyncError("bad chunk") }
+                guard let sizeLine = try await reader.readLine(), let size = Int64(sizeLine.split(separator: ";").first.map { $0.trimmingCharacters(in: .whitespaces) } ?? "", radix: 16), size >= 0 else { throw SyncError("bad chunk") }
                 if size == 0 {
                     while let trailer = try await reader.readLine(), !trailer.isEmpty {}
                     finished = true
@@ -361,15 +361,29 @@ final class HttpServer {
         }
         return try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<UInt16, Error>) in
             var resumed = false
+            var lastWait: Error?
+            let queue = DispatchQueue(label: "sync.listener")
             listener.stateUpdateHandler = { state in
                 guard !resumed else { return }
                 switch state {
                 case .ready: resumed = true; continuation.resume(returning: listener.port?.rawValue ?? 0)
-                case .failed(let error): resumed = true; continuation.resume(throwing: error)
+                case .failed(let error): resumed = true; listener.cancel(); continuation.resume(throwing: error)
+                case .cancelled: resumed = true; continuation.resume(throwing: SyncError("listener stopped"))
+                case .waiting(let error): lastWait = error
                 default: break
                 }
             }
-            listener.start(queue: DispatchQueue(label: "sync.listener"))
+            listener.start(queue: queue)
+            // A listener with no usable network stays waiting for a path for ever: the Sync screen would wait with it,
+            // and a start that finally came up after a newer one would leave both listening.
+            queue.asyncAfter(deadline: .now() + 10) {
+                guard !resumed else { return }
+                resumed = true
+                // Given up on, so it is also shut down: left running it would take the port the moment a network appears,
+                // with nothing behind it to answer, and every later start would have to use another port.
+                listener.cancel()
+                continuation.resume(throwing: SyncError("timed out: \(lastWait?.localizedDescription ?? "no network")"))
+            }
         }
     }
 
@@ -537,15 +551,28 @@ final class LocalSendReceiver {
         return .json(listener.myInfo().json())
     }
 
+    /// The largest file one offer may state (1 TiB), and the most an upload may send when it stated no size.
+    private static let maxFileSize: Int64 = 1 << 40
+    private static let maxUnstatedUpload: Int64 = 16 * 1024 * 1024
+    /// A links or favorites manifest is a small JSON file; anything bigger is not one of ours.
+    static let maxManifestSize: Int64 = 4 << 20
+
     private func prepare(_ request: HttpRequest, _ listener: ReceiveListener) async -> HttpResponse {
         guard let body = try? await readJSON(request), let infoJSON = body["info"] as? [String: Any], let filesJSON = body["files"] as? [String: Any] else { return .empty(400) }
         let from = DeviceInfo(json: infoJSON)
         var offeredList: [FileInfo] = []
         for (key, value) in filesJSON {
             guard let f = value as? [String: Any], let name = f["fileName"] as? String else { return .empty(400) }
-            offeredList.append(FileInfo(id: f["id"] as? String ?? key, fileName: name, size: (f["size"] as? NSNumber)?.int64Value ?? 0,
+            // The sender states the size; it is never trusted to be sane, so a sum of sizes cannot overflow.
+            let size = min(max((f["size"] as? NSNumber)?.int64Value ?? 0, 0), Self.maxFileSize)
+            // A manifest is read whole once it has arrived, so one announced as larger than any manifest is refused here.
+            if name == linksFileName || name == favoritesFileName, size > Self.maxManifestSize { return .empty(413) }
+            offeredList.append(FileInfo(id: f["id"] as? String ?? key, fileName: name, size: size,
                                  fileType: f["fileType"] as? String ?? "application/octet-stream", preview: f["preview"] as? String))
         }
+        // Two entries may carry the same id (it is a field of the entry, not its key): the first one counts.
+        var seenIds = Set<String>()
+        offeredList = offeredList.filter { seenIds.insert($0.id).inserted }
         // Only another copy of this app can send here: what arrives is read as this app's own links and videos.
         guard from.isGalleryDl else { return .empty(403) }
         if offeredList.isEmpty { return .empty(204) }
@@ -556,15 +583,16 @@ final class LocalSendReceiver {
         let list = await listener.wanted(offeredList)
         if list.isEmpty { lock.lock(); asking = false; lock.unlock(); return .empty(204) }
         let accepted = await listener.offered(from: from, address: request.remoteAddress, files: list)
-        lock.lock(); asking = false; lock.unlock()
-        guard accepted else { return .empty(403) }
+        guard accepted else { lock.lock(); asking = false; lock.unlock(); return .empty(403) }
         let id = UUID().uuidString
         let dir = cacheDir.appendingPathComponent("sync-\(id)", isDirectory: true)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         var tokens: [String: String] = [:]
         for file in list { tokens[file.id] = UUID().uuidString }
+        // The offer stays "being asked" until the session exists, so a second offer cannot slip in between.
         lock.lock()
         session = Session(id: id, from: from, address: request.remoteAddress, dir: dir, files: Dictionary(uniqueKeysWithValues: list.map { ($0.id, $0) }), tokens: tokens)
+        asking = false
         lock.unlock()
         return .json(["sessionId": id, "files": tokens])
     }
@@ -586,11 +614,15 @@ final class LocalSendReceiver {
             var written: Int64 = 0
             var lastReport = Date.distantPast
             let info = s.files[fileId]
+            let stated = info?.size ?? 0
+            let limit = stated > 0 ? stated : Self.maxUnstatedUpload
             while true {
                 let piece = try await request.body.read(256 * 1024)
                 if piece.isEmpty { break }
                 try handle.write(contentsOf: piece)
                 written += Int64(piece.count)
+                // More than the offer stated is never stored: an endless body would fill the device.
+                if written > limit { throw SyncError("more than offered") }
                 if let info, info.size > 0, Date().timeIntervalSince(lastReport) > 0.25 {
                     lastReport = Date()
                     lock.lock(); let finished = s.received.count; lock.unlock()

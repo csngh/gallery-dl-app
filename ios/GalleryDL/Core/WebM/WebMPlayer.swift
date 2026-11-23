@@ -1,5 +1,9 @@
 import AVFoundation
+#if canImport(UIKit)
 import UIKit
+#else
+import AppKit
+#endif
 
 /// Plays a WebM video the system player cannot open: libvpx decodes the frames and an `AVSampleBufferDisplayLayer` shows
 /// them. A render synchronizer keeps the clock, so play, pause, speed and seeking are the system's own and the picture
@@ -295,7 +299,21 @@ final class WebMPlayer {
 
 /// The view the picture is drawn in. Its own layer is the display layer, exactly as an `AVPlayerLayer` view works, so UIKit
 /// sizes and places it and there is no frame to set by hand.
+#if canImport(UIKit)
 final class WebMSurfaceView: UIView {
     override class var layerClass: AnyClass { AVSampleBufferDisplayLayer.self }
     var displayLayer: AVSampleBufferDisplayLayer { layer as! AVSampleBufferDisplayLayer }
 }
+#else
+final class WebMSurfaceView: NSView {
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        wantsLayer = true
+    }
+
+    required init?(coder: NSCoder) { fatalError("not used") }
+
+    override func makeBackingLayer() -> CALayer { AVSampleBufferDisplayLayer() }
+    var displayLayer: AVSampleBufferDisplayLayer { layer as! AVSampleBufferDisplayLayer }
+}
+#endif

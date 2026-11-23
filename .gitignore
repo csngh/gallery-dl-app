@@ -37,6 +37,17 @@ xcuserdata/
 DerivedData/
 ios/dist/
 
+# macOS (generated or fetched by macos/scripts/setup.sh)
+macos/Python.xcframework/
+macos/app_packages/
+macos/Vendor/
+macos/.venv-setup/
+macos/GalleryDLMac.xcodeproj/
+macos/GalleryDLMac/Info.plist
+macos/dist/
+*.gdlplugin
+__pycache__/
+
 # Local assistant and design notes
 .impeccable/
 CLAUDE.md
@@ -45,3 +56,6 @@ PRODUCT.md
 
 # Generated launch-video working files (the finished video is docs/demo.mp4)
 brag-output*/
+
+# Local download checks
+test-downloads/

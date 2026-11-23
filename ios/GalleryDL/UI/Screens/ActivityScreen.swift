@@ -37,7 +37,8 @@ struct ActivityScreen: View {
 
         VStack(spacing: 0) {
             TopBar(title: S.navActivity, leading: {
-                IconButton(symbol: "chevron.left", color: Brand.onSurface, label: S.actionBack, action: onBack)
+                // The Mac sidebar is the way back.
+                if !Platform.isMac { IconButton(symbol: "chevron.left", color: Brand.onSurface, label: S.actionBack, action: onBack) }
             }, trailing: {
                 if retryable > 0 {
                     TextPill(title: S.actionRetryFailed(retryable), symbol: "arrow.clockwise", color: ActionColors.positive) {

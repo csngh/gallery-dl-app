@@ -91,6 +91,7 @@
     <string name="action_previous_video">Previous video</string>
     <string name="action_next_video">Next video</string>
     <string name="action_skip_back">Back 10 seconds</string>
+    <string name="action_seek">Playback position</string>
     <string name="action_skip_forward">Forward 10 seconds</string>
     <string name="action_landscape">Landscape</string>
     <string name="action_exit_landscape">Portrait</string>
@@ -402,8 +403,11 @@
 
     <string name="option_startup_sound_title">Startup sound</string>
     <string name="option_startup_sound_body">Plays a short sound while the logo appears when the app opens. It stays silent when your phone is on silent or vibrate.</string>
-    <string name="settings_appearance_title">Startup and previews</string>
-    <string name="settings_appearance_body">What happens when the app opens, and how the library looks.</string>
+    <string name="settings_appearance_title">Appearance and startup</string>
+    <string name="settings_appearance_body">Choose a theme and adjust startup sound and library previews.</string>
+    <string name="option_theme_title">Theme</string>
+    <string name="option_theme_dark">Dark</string>
+    <string name="option_theme_light">Light</string>
     <string name="option_live_previews_title">Live previews</string>
     <string name="option_retry_previews_title">Failed previews</string>
     <plurals name="option_retry_previews_body">
@@ -435,4 +439,22 @@
     <string name="notif_complete">Download complete</string>
     <string name="notif_partial">Download complete with errors</string>
     <string name="notif_failed">Download failed</string>
+    <string name="settings_plugins_title">Extractor plugins</string>
+    <string name="settings_plugins_body">Add support for extra sites from a local .gdlplugin file.</string>
+    <string name="plugins_trust">Plugins can access the same files and data as Gallery DL. Enable only plugins you trust.</string>
+    <string name="plugins_restart_android">After downloads finish, force stop Gallery DL in system Settings, then reopen it to apply your plugin changes.</string>
+    <string name="plugins_empty">No extractor plugins installed.</string>
+    <string name="plugins_no_picker">No file picker is available on this device.</string>
+    <string name="plugins_active">Active</string>
+    <string name="plugins_not_loaded">Not loaded</string>
+    <string name="plugins_enable_pending">Enables after restart</string>
+    <string name="plugins_disable_pending">Disables after restart</string>
+    <string name="plugins_disabled">Disabled</string>
+    <string name="plugins_disable">Disable</string>
+    <string name="plugins_enable">Enable</string>
+    <string name="plugins_import">Import plugin</string>
+    <string name="plugins_enable_title">Trust and enable %1$s?</string>
+    <string name="plugins_enable_message">This plugin can run code with the same permissions as Gallery DL. It will load after you restart the app.</string>
+    <string name="plugins_remove_title">Remove %1$s?</string>
+    <string name="plugins_remove_message">This removes the installed plugin, not your links or downloads.</string>
 </resources>

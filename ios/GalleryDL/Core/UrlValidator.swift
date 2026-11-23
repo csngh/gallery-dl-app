@@ -1,6 +1,6 @@
 import Foundation
 
-enum UrlCheck { case valid, malformed, unsupported }
+enum UrlCheck { case valid, malformed, unsupported, engineUnavailable }
 
 /// `site` is only set for a valid link.
 struct UrlResult {

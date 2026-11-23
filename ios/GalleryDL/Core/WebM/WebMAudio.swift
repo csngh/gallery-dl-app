@@ -26,7 +26,7 @@ final class WebMAudioDecoder {
                 return vorbisdec_create(base, raw.count, &count, &rate)
             }
             guard let decoder else { return nil }
-            guard count == 1 || count == 2, rate > 0, let known = Self.describe(channels: Int(count), rate: Double(rate)) else {
+            guard count == 1 || count == 2, rate > 0, rate <= 384_000, let known = Self.describe(channels: Int(count), rate: Double(rate)) else {
                 vorbisdec_destroy(decoder)
                 return nil
             }

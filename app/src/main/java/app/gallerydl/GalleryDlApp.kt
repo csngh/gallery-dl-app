@@ -40,6 +40,7 @@ class AppContainer(context: Context) {
     val options: StateFlow<GalleryDlOptions?> = settingsRepository.options.stateIn(appScope, SharingStarted.Eagerly, null)
     val destination: StateFlow<DownloadDestination?> = settingsRepository.destination.stateIn(appScope, SharingStarted.Eagerly, null)
     val startupSound: StateFlow<Boolean> = settingsRepository.startupSound.stateIn(appScope, SharingStarted.Eagerly, true)
+    val darkAppearance: StateFlow<Boolean> = settingsRepository.darkAppearance.stateIn(appScope, SharingStarted.Eagerly, true)
     val folderColumns: StateFlow<Int> = settingsRepository.folderColumns.stateIn(appScope, SharingStarted.Eagerly, 3)
     val libraryColumns: StateFlow<Int> = settingsRepository.libraryColumns.stateIn(appScope, SharingStarted.Eagerly, 2)
     val libraryNewestFirst: StateFlow<Boolean> = settingsRepository.libraryNewestFirst.stateIn(appScope, SharingStarted.Eagerly, true)
